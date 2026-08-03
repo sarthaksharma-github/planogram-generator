@@ -150,11 +150,10 @@ def apply_notes_rules(
     """Apply matching NOTES_RULES via stable partition.
 
     For each triggered rule:
-      - SKUs whose description contains any rule keyword → moved to tail.
-      - All others → remain in head.
+      - Checks if any trigger keyword appears in the Notes text (case-insensitive).
+      - SKUs whose description contains any SKU keyword (e.g. "baja", "vigo") -> moved to tail.
+      - All others -> remain in head.
       - Relative order is preserved within both head and tail.
-
-    No re-sorting occurs.
     """
     if not notes or not isinstance(notes, str):
         return records
@@ -163,16 +162,26 @@ def apply_notes_rules(
     result = list(records)
 
     for rule in NOTES_RULES:
-        if rule["trigger"] not in notes_lower:
+        # Support both new trigger_keywords and legacy trigger string
+        triggers = rule.get("trigger_keywords", [])
+        if "trigger" in rule:
+            triggers.append(rule["trigger"])
+
+        # Check if ANY trigger keyword appears in the notes text
+        is_triggered = any(tr.lower() in notes_lower for tr in triggers if tr)
+        if not is_triggered:
             continue
-        keywords = [kw.lower() for kw in rule.get("keywords", [])]
-        if not keywords:
+
+        # Support both new sku_keywords and legacy keywords list
+        sku_kws = [kw.lower() for kw in rule.get("sku_keywords", rule.get("keywords", [])) if kw]
+        if not sku_kws:
             continue
 
         head: List[SKURecord] = []
         tail: List[SKURecord] = []
         for rec in result:
-            if any(kw in rec.description.lower() for kw in keywords):
+            rec_desc_lower = rec.description.lower()
+            if any(kw in rec_desc_lower for kw in sku_kws):
                 tail.append(rec)
             else:
                 head.append(rec)
