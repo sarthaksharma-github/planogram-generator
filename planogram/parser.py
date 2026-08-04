@@ -8,9 +8,17 @@ from planogram.logger import PlanogramLogger
 # Pre-compiled regexes (compiled once at import time for performance)
 # ---------------------------------------------------------------------------
 
-# Matches the leading "N Bay -" or "N BAY -" prefix.
+# Matches the leading "N Bay -", "N BAY -", "N Bay " prefix.
+#
+# The dash after "Bay" is OPTIONAL (? quantifier) to handle real-world
+# POG strings that omit it, e.g.:
+#   "8 Bay 99,99,..."                  → no dash between Bay and tokens
+#   "1 Bay 99C - LFT - Full(...)"      → no dash, single token with description
+#   "1 Bay 99 - OPP Plug & Play"       → no dash before token
+#   "6 Bay-99,99,..." (dash attached)  → still handled by the dash clause
+#   "8 Bay - 99 - description"         → standard format with dash + spaces
 _RE_LEADING_COUNT = re.compile(
-    r"^\s*(\d+)\s+bay\s*[-\u2013]\s*",
+    r"^\s*(\d+)\s+bay\s*[-\u2013]?\s*",
     re.IGNORECASE,
 )
 
@@ -22,12 +30,17 @@ _RE_VALID_TOKEN = re.compile(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?$")
 # Matches a multiplier pair: "<count>-<size>"  e.g. "8-99", "2-51"
 _RE_MULTIPLIER_TOKEN = re.compile(r"^(\d+)-([A-Za-z0-9]+)$")
 
-# Extracts only the leading bay-size prefix from a token that has trailing
-# description text.
-#   "99 - Floor Tile Test - Str 1602 - June 26"  →  "99"
-#   "87 - Stone Look Tile - Mid"                  →  "87"
-#   "99C - Some Text"                             →  "99C"
-_RE_BAYSIZE_PREFIX = re.compile(r"^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)")
+# Extracts ONLY the leading numeric bay-size from a token that has trailing
+# description text.  Restricted to: digits + up to 2 letters.
+#
+#   "99 - Floor Tile Test - Str 1602"  →  "99"
+#   "99C - Stone Look..."              →  "99C"
+#   "87 - Mid..."                      →  "87"
+#   "99-Stone Look -Mid -v1 - Apr"     →  "99"  (stops before the dash)
+#
+# Previously used r"^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)" which incorrectly
+# captured "99-STONE" as a single bay-size token (Bug #3).
+_RE_BAYSIZE_PREFIX = re.compile(r"^(\d+[A-Za-z]{0,2})")
 
 
 def parse_pog_string(
@@ -139,17 +152,17 @@ def parse_pog_string(
 # Self-tests — call run_self_tests() to verify the parser is working
 # ---------------------------------------------------------------------------
 _SELF_TESTS: List[Tuple[str, List[str]]] = [
-    # FORMAT C — no trailing text
+    # FORMAT C — standard with dash
     ("8 Bay - 99",
      ["99"] * 8),
-    # FORMAT C — WITH trailing description text (the main fix)
+    # FORMAT C — WITH trailing description text
     ("12 Bay - 99 - Floor Tile Test - Str 1602 - June 26",
      ["99"] * 12),
     ("5 Bay - 99 - Stone Look Tile -South-v1 - April 2026",
      ["99"] * 5),
     ("1 Bay - 51 - LFT - Full(Sku Swap)",
      ["51"]),
-    # FORMAT B — clean explicit list
+    # FORMAT B — clean explicit list with dash
     ("7 BAY - 99,99,99,99,99,99,87",
      ["99"] * 6 + ["87"]),
     # FORMAT B — explicit list WITH trailing description on last token
@@ -163,6 +176,23 @@ _SELF_TESTS: List[Tuple[str, List[str]]] = [
     # FORMAT A — multiplier shorthand
     ("10 Bay - 8-99,2-51",
      ["99"] * 8 + ["51"] * 2),
+    # ── NEW: Real-world failure cases (Bug fixes) ─────────────────────────
+    # Bug 1: NO dash between 'Bay' and the token list; trailing description
+    ("8 Bay 99,99,99,99,99,99,87,87 -Stone Look Tile- Mid - April 2026",
+     ["99"] * 6 + ["87"] * 2),
+    # Bug 2: NO dash between 'Bay' and single token; LFT-style description
+    ("1 Bay 99C - LFT - Full(Shoregaze Sku Swap) - April 2026",
+     ["99C"]),
+    # Bug 3: Dash attached to 'Bay' (no space); last token has 'word-word' description
+    #         _RE_BAYSIZE_PREFIX must NOT capture '99-STONE'; only '99'
+    ("6 Bay-99,99,99,75,99,99-Stone Look -Mid -v1 - April 2026",
+     ["99", "99", "99", "75", "99", "99"]),
+    # Bug 5: NO dash between 'Bay' and token; description contains '&' and spaces
+    ("1 Bay 99 - OPP Plug & Play",
+     ["99"]),
+    # Edge: dash attached to Bay, no space, single-size format
+    ("5 Bay-99 - Stone Look Tile - April 2026",
+     ["99"] * 5),
 ]
 
 
