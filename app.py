@@ -330,8 +330,7 @@ def load_workbook_from_bytes(
         "stock_desc": _find_col(df_sd, ["Stock Description", "Stock Desc", "Description"], 2, s_sd, logger),
         "stock_face": _find_col(df_sd, ["Facings", "Facing", "Stock Facings", "Stock Facing"], 4, s_sd, logger),
         "disp_sku":   _find_col(df_sd, ["Display SKU", "Display Sku"], 5, s_sd, logger),
-        "disp_desc":  _find_col(df_sd, ["Display Description", "Display Desc"], 6, s_sd, logger),
-        "disp_face":  _find_col(df_sd, ["Facings.1", "Facing.1", "Display Facings", "Display Facing"], 8, s_sd, logger),
+        "disp_face":  _find_col(df_sd, ["Display Facing", "Display Facings", "Display", "Facings.1", "Facing.1"], 7 if len(sd_cols) <= 9 else 8, s_sd, logger),
         "cf":         _find_col(df_sd, ["CF"], len(sd_cols) - 1, s_sd, logger),
     }
 
@@ -373,23 +372,17 @@ def _parse_facing(raw: Any, store: Any, sku: Any, logger: PlanogramLogger) -> in
 
 def build_display_index(df: pd.DataFrame, cols: Dict[str, str], logger: PlanogramLogger) -> Dict[str, List[SKURecord]]:
     index: Dict[str, List[SKURecord]] = defaultdict(list)
-    any_facing_2 = False
     for _, row in df.iterrows():
         store  = _clean_store_id(row[cols["store"]])
         sku    = _str(row[cols["disp_sku"]])
         desc   = _str(row[cols["disp_desc"]])
-        facing = _parse_facing(row[cols["disp_face"]], store, sku, logger)
+        disp_f  = _parse_facing(row[cols["disp_face"]], store, sku, logger)
+        stock_f = _parse_facing(row[cols["stock_face"]], store, sku, logger)
+        # Display Board facing uses max(Display Facing, Stock Facing)
+        facing  = max(disp_f, stock_f)
         if not store or not sku:
             continue
-        if facing == 2:
-            any_facing_2 = True
         index[store].append(SKURecord(sku=sku, description=desc, facing=facing, sku_type="Display"))
-    if not any_facing_2:
-        logger.warning(
-            f"[Display] ZERO SKUs have Facing=2 across all stores. "
-            f"Detected column for Display Facing: '{cols['disp_face']}' — "
-            f"verify this is correct in the Column Detection Report above."
-        )
     return dict(index)
 
 
