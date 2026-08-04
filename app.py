@@ -196,6 +196,46 @@ if run_clicked:
         with st.spinner("📂  Loading workbook…"):
             wb_data = load_wb(file_bytes, logger)
 
+        # ── Column Detection Report (always shown, collapsed by default) ───
+        st.markdown("---")
+        with st.expander("🔍 Column Detection Report — verify these before generating", expanded=False):
+            st.caption(
+                "This table shows which actual Excel column header was mapped to each "
+                "logical field. If a Facing column looks wrong (e.g. mapped to CF), "
+                "that explains incorrect Facing values and SKU pool sizes."
+            )
+            col_report_rows = [
+                # ── Store List ────────────────────────────────────────────
+                ("Store List",      "Store ID",          wb_data.cols_sl.get("store", "?")),
+                ("Store List",      "Current Store POG", wb_data.cols_sl.get("pog",   "?")),
+                ("Store List",      "Current LFT",       wb_data.cols_sl.get("lft",   "?")),
+                ("Store List",      "Notes",             wb_data.cols_sl.get("notes", "?")),
+                # ── Stock SKUs and Displays ───────────────────────────────
+                ("Stock & Display", "Store ID",          wb_data.cols_sd.get("store",      "?")),
+                ("Stock & Display", "Stock SKU",         wb_data.cols_sd.get("stock_sku",  "?")),
+                ("Stock & Display", "Stock Description", wb_data.cols_sd.get("stock_desc", "?")),
+                ("Stock & Display", "⭐ Stock Facing",   wb_data.cols_sd.get("stock_face", "?")),
+                ("Stock & Display", "Display SKU",       wb_data.cols_sd.get("disp_sku",   "?")),
+                ("Stock & Display", "Display Description", wb_data.cols_sd.get("disp_desc","?")),
+                ("Stock & Display", "⭐ Display Facing", wb_data.cols_sd.get("disp_face",  "?")),
+                ("Stock & Display", "CF",                wb_data.cols_sd.get("cf",         "?")),
+                # ── Special Order Boards ──────────────────────────────────
+                ("Special Orders",  "Store ID",          wb_data.cols_so.get("store",   "?")),
+                ("Special Orders",  "SO SKU",            wb_data.cols_so.get("so_sku",  "?")),
+                ("Special Orders",  "SO Description",    wb_data.cols_so.get("so_desc", "?")),
+                ("Special Orders",  "⭐ SO Facing",      wb_data.cols_so.get("so_face", "?")),
+                ("Special Orders",  "CF",                wb_data.cols_so.get("cf",      "?")),
+            ]
+            import pandas as _pd
+            _col_df = _pd.DataFrame(col_report_rows, columns=["Sheet", "Logical Field", "→ Actual Excel Column Header Detected"])
+            st.dataframe(_col_df, use_container_width=True, hide_index=True)
+            st.caption(
+                "⭐ Facing columns are the most critical. If 'Stock Facing' and 'Display Facing' "
+                "both show the SAME column header, the duplicate Facings column was not detected. "
+                "Similarly, if a Facing column shows 'CF', it's reading the wrong column — "
+                "this causes facing values to be clamped to 1."
+            )
+
         with st.spinner("⚙️  Generating planogram…"):
             planogram_df, validation_df = gen_pog(wb_data, logger)
 
@@ -213,6 +253,7 @@ if run_clicked:
         with st.expander("Technical details"):
             st.code(traceback.format_exc())
         st.stop()
+
 
     # ─── Results ──────────────────────────────────────────────────────────
     st.markdown("---")
