@@ -69,6 +69,7 @@ def build_display_index(
 ) -> Dict[str, List[SKURecord]]:
     """Build store → [SKURecord] mapping for Display Board SKUs."""
     index: Dict[str, List[SKURecord]] = defaultdict(list)
+    any_facing_2 = False
     for _, row in df.iterrows():
         store  = _clean_store_id(row[cols["store"]])
         sku    = _str(row[cols["disp_sku"]])
@@ -76,8 +77,18 @@ def build_display_index(
         facing = _parse_facing(row[cols["disp_face"]], store, sku, logger)
         if not store or not sku:
             continue
+        if facing == 2:
+            any_facing_2 = True
         index[store].append(
             SKURecord(sku=sku, description=desc, facing=facing, sku_type="Display")
+        )
+    # Sanity check: if no SKU in the entire sheet has Facing=2, the column
+    # mapping is likely wrong (e.g. disp_face was resolved to the CF column).
+    if not any_facing_2:
+        logger.warning(
+            f"[Display] ZERO SKUs have Facing=2 across all stores. "
+            f"The 'Display Facing' column was detected as '{cols['disp_face']}' — "
+            f"verify this is the correct column in the Column Detection Report."
         )
     return dict(index)
 
