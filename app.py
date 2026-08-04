@@ -330,6 +330,7 @@ def load_workbook_from_bytes(
         "stock_desc": _find_col(df_sd, ["Stock Description", "Stock Desc", "Description"], 2, s_sd, logger),
         "stock_face": _find_col(df_sd, ["Facings", "Facing", "Stock Facings", "Stock Facing"], 4, s_sd, logger),
         "disp_sku":   _find_col(df_sd, ["Display SKU", "Display Sku"], 5, s_sd, logger),
+        "disp_desc":  _find_col(df_sd, ["Display Description", "Display Desc"], 6, s_sd, logger),
         "disp_face":  _find_col(df_sd, ["Display Facing", "Display Facings", "Display", "Facings.1", "Facing.1"], 7 if len(sd_cols) <= 9 else 8, s_sd, logger),
         "cf":         _find_col(df_sd, ["CF"], len(sd_cols) - 1, s_sd, logger),
     }
