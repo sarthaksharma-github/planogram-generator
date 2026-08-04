@@ -223,11 +223,11 @@ def load_workbook_from_bytes(
                           ["Display Description", "Display Desc"],
                           6, s_sd, logger,
                       ),
-        # Second "Facings" column — pandas renames it to "Facings.1" (position I / index 8)
+        # Second "Facings" column — index 7 in 9-column sheets, index 8 in 10-column sheets
         "disp_face":  _find_col(
                           df_sd,
-                          ["Facings.1", "Facing.1", "Display Facings", "Display Facing"],
-                          8, s_sd, logger,
+                          ["Display Facing", "Display Facings", "Display", "Facings.1", "Facing.1"],
+                          7 if len(sd_cols) <= 9 else 8, s_sd, logger,
                       ),
         "cf":         _find_col(df_sd, ["CF"], len(sd_cols) - 1, s_sd, logger),
     }
