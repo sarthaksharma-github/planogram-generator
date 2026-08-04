@@ -30,17 +30,25 @@ _RE_VALID_TOKEN = re.compile(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?$")
 # Matches a multiplier pair: "<count>-<size>"  e.g. "8-99", "2-51"
 _RE_MULTIPLIER_TOKEN = re.compile(r"^(\d+)-([A-Za-z0-9]+)$")
 
-# Extracts ONLY the leading numeric bay-size from a token that has trailing
-# description text.  Restricted to: digits + up to 2 letters.
+# Extracts the leading bay-size token from a string that has trailing
+# description text.  Handles TWO cases:
 #
-#   "99 - Floor Tile Test - Str 1602"  →  "99"
-#   "99C - Stone Look..."              →  "99C"
-#   "87 - Mid..."                      →  "87"
-#   "99-Stone Look -Mid -v1 - Apr"     →  "99"  (stops before the dash)
+#   1. Plain size:   "99 - Floor Tile..."        → "99"
+#                    "99C - Stone Look..."        → "99C"
+#                    "87 - Mid..."               → "87"
 #
-# Previously used r"^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)" which incorrectly
-# captured "99-STONE" as a single bay-size token (Bug #3).
-_RE_BAYSIZE_PREFIX = re.compile(r"^(\d+[A-Za-z]{0,2})")
+#   2. Multiplier:   "1-87 - Stone Look..."      → "1-87"
+#                    "3-99 - Floor Tile..."      → "3-99"
+#                    "1-75, 3-99 ..." (split)    → "3-99" for last token
+#
+# Safety: the optional suffix requires DIGITS after the dash, so it NEVER
+# captures description words:
+#   "99-Stone Look..."  → "99"  (Stone starts with letter, not digit)
+#   "99-STONE"          → "99"  (STONE starts with letter, not digit)
+#
+# Previously r"^(\d+[A-Za-z]{0,2})" missed multiplier prefixes like "1-87",
+# extracting only "1" instead (Bug: 'Unsupported Bay Size 1' in Bay N).
+_RE_BAYSIZE_PREFIX = re.compile(r"^(\d+[A-Za-z]{0,2}(?:-\d+[A-Za-z]{0,2})?)")
 
 
 def parse_pog_string(
@@ -173,26 +181,33 @@ _SELF_TESTS: List[Tuple[str, List[str]]] = [
     # FORMAT B — with bay-size variants
     ("10 BAY - 99C,99,99,99,99,99C,99,99,99,99",
      ["99C", "99", "99", "99", "99", "99C", "99", "99", "99", "99"]),
-    # FORMAT A — multiplier shorthand
+    # FORMAT A — multiplier shorthand, clean
     ("10 Bay - 8-99,2-51",
      ["99"] * 8 + ["51"] * 2),
-    # ── NEW: Real-world failure cases (Bug fixes) ─────────────────────────
-    # Bug 1: NO dash between 'Bay' and the token list; trailing description
+    # ── Bug fixes: no-dash formats ─────────────────────────────────
     ("8 Bay 99,99,99,99,99,99,87,87 -Stone Look Tile- Mid - April 2026",
      ["99"] * 6 + ["87"] * 2),
-    # Bug 2: NO dash between 'Bay' and single token; LFT-style description
     ("1 Bay 99C - LFT - Full(Shoregaze Sku Swap) - April 2026",
      ["99C"]),
-    # Bug 3: Dash attached to 'Bay' (no space); last token has 'word-word' description
-    #         _RE_BAYSIZE_PREFIX must NOT capture '99-STONE'; only '99'
     ("6 Bay-99,99,99,75,99,99-Stone Look -Mid -v1 - April 2026",
      ["99", "99", "99", "75", "99", "99"]),
-    # Bug 5: NO dash between 'Bay' and token; description contains '&' and spaces
     ("1 Bay 99 - OPP Plug & Play",
      ["99"]),
-    # Edge: dash attached to Bay, no space, single-size format
     ("5 Bay-99 - Stone Look Tile - April 2026",
      ["99"] * 5),
+    # ── Bug fixes: multiplier format with spaces after comma AND trailing description ──
+    # The LAST multiplier token has trailing description text.
+    # _RE_BAYSIZE_PREFIX must capture e.g. "1-87" not just "1".
+    ("5 Bay- 4-99, 1-87 - Stone Look Tile -Mid (w/EZR) - CDS",
+     ["99"] * 4 + ["87"]),
+    ("10 Bay - 9-99, 1-75 - Stone Look Tile -Mid - April 26",
+     ["99"] * 9 + ["75"]),
+    ("10 Bay- 8-99, 2-51 - Stone Look Tile -Mid - April 26",
+     ["99"] * 8 + ["51"] * 2),
+    ("4 Bay-  1-75, 3-99 - Stone Look Tile -Mid - April 26",
+     ["75"] + ["99"] * 3),
+    ("3 Bay- 2-99, 1-75 - Stone Look Tile -Mid - April 26",
+     ["99"] * 2 + ["75"]),
 ]
 
 
