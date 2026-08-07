@@ -60,6 +60,16 @@ class SKURecord:
     sku_type:    str   # "Display" | "SO" | "Stock"
 
 
+@dataclass
+class SORecord:
+    """One entry in the global Special Order ranked list."""
+    rank:        int
+    category:    str   # "Stone" | "Wood" (or any string from the sheet)
+    sku:         str
+    description: str
+    omsid:       str
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 3 — CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -335,13 +345,12 @@ def load_workbook_from_bytes(
         "cf":         _find_col(df_sd, ["CF"], len(sd_cols) - 1, s_sd, logger),
     }
 
-    so_cols = list(df_so.columns)
     cols_so = {
-        "store":   _find_col(df_so, ["Store"], 0, s_so, logger),
-        "so_sku":  _find_col(df_so, ["SO SKU", "So Sku", "Display SKU", "SKU"], 1, s_so, logger),
-        "so_desc": _find_col(df_so, ["Description", "Display Description", "SO Description"], 2, s_so, logger),
-        "so_face": _find_col(df_so, ["Facings", "Facing"], 4, s_so, logger),
-        "cf":      _find_col(df_so, ["CF"], len(so_cols) - 1, s_so, logger),
+        "combined_rank": _find_col(df_so, ["Combined Rank", "Rank", "Combined rank"], 0, s_so, logger),
+        "category":      _find_col(df_so, ["Category", "category"], 1, s_so, logger),
+        "sku":           _find_col(df_so, ["SKU", "Sku"], 2, s_so, logger),
+        "sku_desc":      _find_col(df_so, ["SKU Description", "Description", "Sku Description"], 3, s_so, logger),
+        "omsid":         _find_col(df_so, ["OMSID", "OMS ID", "Omsid"], 4, s_so, logger),
     }
 
     return WorkbookData(
@@ -400,17 +409,154 @@ def build_stock_index(df: pd.DataFrame, cols: Dict[str, str], logger: PlanogramL
     return dict(index)
 
 
-def build_so_index(df: pd.DataFrame, cols: Dict[str, str], logger: PlanogramLogger) -> Dict[str, List[SKURecord]]:
-    index: Dict[str, List[SKURecord]] = defaultdict(list)
+def build_so_global_list(df: pd.DataFrame, cols: Dict[str, str]) -> List[SORecord]:
+    """Load the global SO ranked list (sorted by Combined Rank)."""
+    records: List[SORecord] = []
     for _, row in df.iterrows():
-        store  = _clean_store_id(row[cols["store"]])
-        sku    = _str(row[cols["so_sku"]])
-        desc   = _str(row[cols["so_desc"]])
-        facing = _parse_facing(row[cols["so_face"]], store, sku, logger)
-        if not store or not sku:
+        try:
+            rank = int(float(str(row[cols["combined_rank"]]).strip()))
+        except (ValueError, TypeError):
             continue
-        index[store].append(SKURecord(sku=sku, description=desc, facing=facing, sku_type="SO"))
-    return dict(index)
+        category = _str(row[cols["category"]])
+        sku      = _str(row[cols["sku"]])
+        desc     = _str(row[cols["sku_desc"]])
+        omsid    = _str(row[cols["omsid"]])
+        if not sku:
+            continue
+        records.append(SORecord(rank=rank, category=category, sku=sku, description=desc, omsid=omsid))
+    records.sort(key=lambda r: r.rank)
+    return records
+
+
+# ---------------------------------------------------------------------------
+# SO conflict-avoidance helpers
+# ---------------------------------------------------------------------------
+
+_RE_WORD_FILTER = re.compile(r"[A-Za-z]")
+
+
+def _extract_product_keywords(desc: str) -> List[str]:
+    """Extract core product name keywords from a SKU description.
+
+    Strategy (handles formats like '9X47 MODENA NATURAL-11.75SF-CA'):
+      1. Drop leading size token  — text before the first space.
+      2. Drop trailing suffix    — text from the first '-' onward.
+      3. Split remaining text on whitespace/underscores.
+      4. Keep only 'proper' words: length >= 3, contains at least one letter,
+         not a pure number string (so '9X47' is kept, '12' is dropped).
+    """
+    if not isinstance(desc, str) or not desc.strip():
+        return []
+    s = desc.strip()
+    # Step 1 — skip leading token (size prefix like '9X47', '12X24', 'DISP_S/O_9X47')
+    # Take everything after the first space
+    if " " in s:
+        s = s.split(" ", 1)[1].strip()
+    # Step 2 — drop suffix from first '-' (removes '-11.75SF-CA', '-16.5X15', etc.)
+    if "-" in s:
+        s = s.split("-", 1)[0].strip()
+    # Step 3 — tokenise
+    tokens = re.split(r"[\s_/]+", s)
+    keywords: List[str] = []
+    for tok in tokens:
+        tok = tok.strip()
+        # Step 4 — filter: must be >= 3 chars, contain a letter, not purely numeric
+        if len(tok) >= 3 and _RE_WORD_FILTER.search(tok) and not tok.isdigit():
+            keywords.append(tok.upper())
+    return keywords
+
+
+def _build_conflict_set(stock_descs: List[str]) -> List[List[str]]:
+    """Build a list of keyword-tuples from stock descriptions.
+
+    Each entry is a list of keywords; an SO description is a conflict if
+    ALL keywords from any one entry appear in it.
+    """
+    result: List[List[str]] = []
+    for desc in stock_descs:
+        kws = _extract_product_keywords(desc)
+        if kws:
+            result.append(kws)
+    return result
+
+
+def _is_so_conflict(so_desc: str, conflict_entries: List[List[str]]) -> bool:
+    """Return True if so_desc matches any conflict entry (all keywords present)."""
+    so_upper = so_desc.upper()
+    for kws in conflict_entries:
+        if all(kw in so_upper for kw in kws):
+            return True
+    return False
+
+
+def select_so_for_store(
+    so_global_list: List[SORecord],
+    conflict_entries: List[List[str]],
+    capacity: int,
+    store: Any,
+    logger: PlanogramLogger,
+) -> List[SKURecord]:
+    """Pick SO SKUs for one store from the global ranked list.
+
+    Walk in Combined Rank order.
+    - If no conflict  → take the item.
+    - If conflict     → find the next non-conflicting item of the SAME category
+                        and take that instead (cascading within category).
+    - Already-used items are never reused.
+    """
+    # Pre-index items by category for fast same-category forward search
+    cat_lists: Dict[str, List[SORecord]] = defaultdict(list)
+    for rec in so_global_list:          # already sorted by rank
+        cat_lists[rec.category.lower()].append(rec)
+
+    used_ranks: set = set()
+    selected:   List[SKURecord] = []
+
+    for rec in so_global_list:
+        if len(selected) >= capacity:
+            break
+        if rec.rank in used_ranks:
+            continue
+
+        if not _is_so_conflict(rec.description, conflict_entries):
+            # No conflict — take it
+            used_ranks.add(rec.rank)
+            selected.append(SKURecord(
+                sku=rec.sku, description=rec.description,
+                facing=1, sku_type="SO",
+            ))
+        else:
+            # Conflict — find next non-conflicting item of the SAME category
+            cat = rec.category.lower()
+            replacement: SORecord | None = None
+            for candidate in cat_lists[cat]:
+                if candidate.rank <= rec.rank:
+                    continue   # only look forward in rank
+                if candidate.rank in used_ranks:
+                    continue
+                if not _is_so_conflict(candidate.description, conflict_entries):
+                    replacement = candidate
+                    break
+
+            if replacement:
+                used_ranks.add(replacement.rank)
+                selected.append(SKURecord(
+                    sku=replacement.sku, description=replacement.description,
+                    facing=1, sku_type="SO",
+                ))
+                logger.info(
+                    f"Store {store}: replaced conflicting SO rank {rec.rank} "
+                    f"({rec.category} '{rec.sku}') with rank {replacement.rank} "
+                    f"('{replacement.sku}')."
+                )
+            else:
+                logger.warning(
+                    f"No non-conflicting {rec.category} SO available to replace "
+                    f"rank {rec.rank} ('{rec.sku}') for store {store}.",
+                    store=store,
+                )
+
+    return selected
 
 
 def expand_facing(records: List[SKURecord]) -> List[SKURecord]:
@@ -503,11 +649,13 @@ def allocate_bay(
 
 def allocate_store(
     store: str, notes: str, bay_list: List[str],
-    raw_display: List[SKURecord], raw_so: List[SKURecord], raw_stock: List[SKURecord],
+    raw_display: List[SKURecord],
+    raw_so: List[SKURecord],      # pre-selected & conflict-free for this store
+    raw_stock: List[SKURecord],
     logger: PlanogramLogger,
 ) -> List[Dict[str, Any]]:
     disp_pool  = expand_facing(apply_notes_rules(raw_display, notes))
-    so_pool    = expand_facing(apply_notes_rules(raw_so,      notes))
+    so_pool    = list(raw_so)     # SO order is fixed by global rank; no notes rules
     stock_pool = expand_facing(apply_notes_rules(raw_stock,   notes))
 
     disp_ptr  = [0]
@@ -541,9 +689,9 @@ def generate_planogram(
     wb_data: WorkbookData,
     logger: PlanogramLogger,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    disp_index  = build_display_index(wb_data.stock_display, wb_data.cols_sd, logger)
-    stock_index = build_stock_index(wb_data.stock_display,   wb_data.cols_sd, logger)
-    so_index    = build_so_index(wb_data.special_orders,     wb_data.cols_so, logger)
+    disp_index     = build_display_index(wb_data.stock_display, wb_data.cols_sd, logger)
+    stock_index    = build_stock_index(wb_data.stock_display,   wb_data.cols_sd, logger)
+    so_global_list = build_so_global_list(wb_data.special_orders, wb_data.cols_so)
 
     store_col    = wb_data.cols_sl["store"]
     store_series = wb_data.store_list[store_col].apply(_clean_store_id)
@@ -583,14 +731,26 @@ def generate_planogram(
 
         raw_display = disp_index.get(store, [])
         raw_stock   = stock_index.get(store, [])
-        raw_so      = so_index.get(store, [])
 
         if not raw_display:
             logger.warning(f"No Display SKUs found for store {store}.", store=store)
-        if not raw_so:
-            logger.warning(f"No SO SKUs found for store {store}.", store=store)
         if not raw_stock:
             logger.warning(f"No Stock SKUs found for store {store}.", store=store)
+
+        # ── SO: select from global ranked list with conflict avoidance ──────
+        # Capacity = sum of SO slots across all valid bays
+        so_capacity = sum(
+            BAY_RULES[b].so for b in bay_list if b in BAY_RULES
+        )
+        # Conflict set = product keywords already present in this store's stock
+        stock_descs     = [rec.description for rec in raw_stock]
+        conflict_entries = _build_conflict_set(stock_descs)
+        raw_so = select_so_for_store(
+            so_global_list, conflict_entries, so_capacity, store, logger
+        )
+        if not raw_so:
+            logger.warning(f"No SO SKUs could be selected for store {store}.", store=store)
+        # ────────────────────────────────────────────────────────────────────
 
         try:
             store_rows = allocate_store(
@@ -784,11 +944,11 @@ if run_clicked:
                 ("Stock & Display", "Display Description", wb_data.cols_sd.get("disp_desc",  "?")),
                 ("Stock & Display", "⭐ Display Facing",   wb_data.cols_sd.get("disp_face",  "?")),
                 ("Stock & Display", "CF",                  wb_data.cols_sd.get("cf",         "?")),
-                ("Special Orders",  "Store ID",            wb_data.cols_so.get("store",   "?")),
-                ("Special Orders",  "SO SKU",              wb_data.cols_so.get("so_sku",  "?")),
-                ("Special Orders",  "SO Description",      wb_data.cols_so.get("so_desc", "?")),
-                ("Special Orders",  "⭐ SO Facing",        wb_data.cols_so.get("so_face", "?")),
-                ("Special Orders",  "CF",                  wb_data.cols_so.get("cf",      "?")),
+                ("Special Orders",  "Combined Rank",       wb_data.cols_so.get("combined_rank", "?")),
+                ("Special Orders",  "Category",            wb_data.cols_so.get("category",      "?")),
+                ("Special Orders",  "SKU",                 wb_data.cols_so.get("sku",           "?")),
+                ("Special Orders",  "SKU Description",     wb_data.cols_so.get("sku_desc",      "?")),
+                ("Special Orders",  "OMSID",               wb_data.cols_so.get("omsid",         "?")),
             ]
             st.dataframe(
                 pd.DataFrame(col_rows, columns=["Sheet", "Logical Field", "→ Actual Excel Column Detected"]),
