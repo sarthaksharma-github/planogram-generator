@@ -543,11 +543,11 @@ def select_so_for_store(
         return None
 
     used_ranks: set = set()
-    # Track (cf_value, SKURecord) so we can sort by CF at the end
-    selected_pairs: List[Tuple[float, SKURecord]] = []
+    # Track (cf_value, category, SKURecord) so we can sort by CF per category
+    selected_triples: List[Tuple[float, str, SKURecord]] = []
 
     def _sel_count() -> int:
-        return len(selected_pairs)
+        return len(selected_triples)
 
     for rec in so_global_list:
         if _sel_count() >= capacity:
@@ -559,7 +559,7 @@ def select_so_for_store(
         if not already_used and not has_conflict:
             # Happy path — take this item directly.
             used_ranks.add(rec.rank)
-            selected_pairs.append((rec.cf, SKURecord(
+            selected_triples.append((rec.cf, rec.category.lower(), SKURecord(
                 sku=rec.sku, description=rec.description,
                 facing=1, sku_type="SO",
             )))
@@ -572,7 +572,7 @@ def select_so_for_store(
 
             if replacement:
                 used_ranks.add(replacement.rank)
-                selected_pairs.append((replacement.cf, SKURecord(
+                selected_triples.append((replacement.cf, replacement.category.lower(), SKURecord(
                     sku=replacement.sku, description=replacement.description,
                     facing=1, sku_type="SO",
                 )))
@@ -591,11 +591,38 @@ def select_so_for_store(
                         store=store,
                     )
 
-    # ── Final step: sort selected SOs by CF (color flow) for shelf placement ──
-    # We tracked CF alongside each selection as (cf_value, SKURecord) pairs.
-    # Items with invalid/missing CF (∞) go to the end.
-    selected_pairs.sort(key=lambda t: t[0])
-    return [t[1] for t in selected_pairs]
+    # ── Final step: sort by CF within each category, then interleave ──────────
+    # Stone and Wood are sorted by CF independently, then assembled into the
+    # 4-Stone / 1-Wood shelf pattern:
+    #   positions 1-4 = Stone (lowest CF first)
+    #   position  5   = Wood  (lowest CF first)
+    #   positions 6-9 = Stone, position 10 = Wood, …
+    # If one category runs out, the other fills in as fallback.
+    stone_items = [rec for _, cf, rec in sorted(
+        [(0, cf, rec) for cf, cat, rec in selected_triples if cat != "wood"],
+        key=lambda t: t[1],
+    )]
+    wood_items = [rec for _, cf, rec in sorted(
+        [(0, cf, rec) for cf, cat, rec in selected_triples if cat == "wood"],
+        key=lambda t: t[1],
+    )]
+
+    result:     List[SKURecord] = []
+    stone_idx = 0
+    wood_idx  = 0
+    for pos in range(1, len(selected_triples) + 1):
+        if pos % 5 == 0:                        # Wood slot
+            if wood_idx < len(wood_items):
+                result.append(wood_items[wood_idx]); wood_idx += 1
+            elif stone_idx < len(stone_items):  # fallback: no more wood
+                result.append(stone_items[stone_idx]); stone_idx += 1
+        else:                                   # Stone slot (positions 1-4, 6-9, …)
+            if stone_idx < len(stone_items):
+                result.append(stone_items[stone_idx]); stone_idx += 1
+            elif wood_idx < len(wood_items):    # fallback: no more stone
+                result.append(wood_items[wood_idx]); wood_idx += 1
+    return result
+
 
 
 def expand_facing(records: List[SKURecord]) -> List[SKURecord]:
