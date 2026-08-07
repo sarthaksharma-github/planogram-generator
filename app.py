@@ -435,6 +435,7 @@ def build_so_global_list(df: pd.DataFrame, cols: Dict[str, str]) -> List[SORecor
     return records
 
 
+
 # ---------------------------------------------------------------------------
 # SO conflict-avoidance helpers
 # ---------------------------------------------------------------------------
@@ -455,19 +456,14 @@ def _extract_product_keywords(desc: str) -> List[str]:
     if not isinstance(desc, str) or not desc.strip():
         return []
     s = desc.strip()
-    # Step 1 — skip leading token (size prefix like '9X47', '12X24', 'DISP_S/O_9X47')
-    # Take everything after the first space
     if " " in s:
         s = s.split(" ", 1)[1].strip()
-    # Step 2 — drop suffix from first '-' (removes '-11.75SF-CA', '-16.5X15', etc.)
     if "-" in s:
         s = s.split("-", 1)[0].strip()
-    # Step 3 — tokenise
     tokens = re.split(r"[\s_/]+", s)
     keywords: List[str] = []
     for tok in tokens:
         tok = tok.strip()
-        # Step 4 — filter: must be >= 3 chars, contain a letter, not purely numeric
         if len(tok) >= 3 and _RE_WORD_FILTER.search(tok) and not tok.isdigit():
             keywords.append(tok.upper())
     return keywords
@@ -505,16 +501,30 @@ def select_so_for_store(
 ) -> List[SKURecord]:
     """Pick SO SKUs for one store from the global ranked list.
 
-    Walk in Combined Rank order.
-    - If no conflict  → take the item.
-    - If conflict     → find the next non-conflicting item of the SAME category
-                        and take that instead (cascading within category).
-    - Already-used items are never reused.
+    Walk in Combined Rank order. For every position:
+    - Available & no conflict  → take it directly.
+    - Already used as a prior replacement  → this slot's category must still be
+      filled; find the next non-used, non-conflicting item of the SAME category.
+    - Conflict with stock      → same as above; find next of the same category.
+
+    This guarantees the category pattern from the global list (e.g. every 5th
+    position is Wood) is preserved even when replacements cascade forward.
     """
-    # Pre-index items by category for fast same-category forward search
+    # Pre-index items by category for same-category forward search
     cat_lists: Dict[str, List[SORecord]] = defaultdict(list)
     for rec in so_global_list:          # already sorted by rank
         cat_lists[rec.category.lower()].append(rec)
+
+    def _next_in_category(cat: str, after_rank: int) -> SORecord | None:
+        """Return the first non-used, non-conflicting SO of `cat` with rank > after_rank."""
+        for candidate in cat_lists[cat]:
+            if candidate.rank <= after_rank:
+                continue
+            if candidate.rank in used_ranks:
+                continue
+            if not _is_so_conflict(candidate.description, conflict_entries):
+                return candidate
+        return None
 
     used_ranks: set = set()
     selected:   List[SKURecord] = []
@@ -522,28 +532,23 @@ def select_so_for_store(
     for rec in so_global_list:
         if len(selected) >= capacity:
             break
-        if rec.rank in used_ranks:
-            continue
 
-        if not _is_so_conflict(rec.description, conflict_entries):
-            # No conflict — take it
+        already_used = rec.rank in used_ranks
+        has_conflict = _is_so_conflict(rec.description, conflict_entries)
+
+        if not already_used and not has_conflict:
+            # Happy path — take this item directly.
             used_ranks.add(rec.rank)
             selected.append(SKURecord(
                 sku=rec.sku, description=rec.description,
                 facing=1, sku_type="SO",
             ))
         else:
-            # Conflict — find next non-conflicting item of the SAME category
+            # Either already consumed as a prior replacement, or conflicts with
+            # this store's stock. Either way, preserve the slot's category:
+            # find the next available item of the SAME category.
             cat = rec.category.lower()
-            replacement: SORecord | None = None
-            for candidate in cat_lists[cat]:
-                if candidate.rank <= rec.rank:
-                    continue   # only look forward in rank
-                if candidate.rank in used_ranks:
-                    continue
-                if not _is_so_conflict(candidate.description, conflict_entries):
-                    replacement = candidate
-                    break
+            replacement = _next_in_category(cat, rec.rank)
 
             if replacement:
                 used_ranks.add(replacement.rank)
@@ -551,17 +556,20 @@ def select_so_for_store(
                     sku=replacement.sku, description=replacement.description,
                     facing=1, sku_type="SO",
                 ))
-                logger.info(
-                    f"Store {store}: replaced conflicting SO rank {rec.rank} "
-                    f"({rec.category} '{rec.sku}') with rank {replacement.rank} "
-                    f"('{replacement.sku}')."
-                )
+                if has_conflict and not already_used:
+                    logger.info(
+                        f"Store {store}: replaced conflicting SO rank {rec.rank} "
+                        f"({rec.category} '{rec.sku}') with rank {replacement.rank} "
+                        f"('{replacement.sku}')."
+                    )
             else:
-                logger.warning(
-                    f"No non-conflicting {rec.category} SO available to replace "
-                    f"rank {rec.rank} ('{rec.sku}') for store {store}.",
-                    store=store,
-                )
+                # No further item of this category is available.
+                if not already_used:
+                    logger.warning(
+                        f"No non-conflicting {rec.category} SO available to replace "
+                        f"rank {rec.rank} ('{rec.sku}') for store {store}.",
+                        store=store,
+                    )
 
     return selected
 
