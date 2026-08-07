@@ -68,6 +68,7 @@ class SORecord:
     sku:         str
     description: str
     omsid:       str
+    cf:          float = 0.0  # Color Flow rank — used to order the final selection
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -358,6 +359,7 @@ def load_workbook_from_bytes(
         "sku":           _find_col(df_so, ["SKU", "Sku"], 2, s_so, logger),
         "sku_desc":      _find_col(df_so, ["SKU Description", "Description", "Sku Description"], 3, s_so, logger),
         "omsid":         _find_col(df_so, ["OMSID", "OMS ID", "Omsid"], 4, s_so, logger),
+        "cf":            _find_col(df_so, ["CF", "Color Flow", "CF Rank"], 5, s_so, logger),
     }
 
     return WorkbookData(
@@ -428,9 +430,14 @@ def build_so_global_list(df: pd.DataFrame, cols: Dict[str, str]) -> List[SORecor
         sku      = _str(row[cols["sku"]])
         desc     = _str(row[cols["sku_desc"]])
         omsid    = _str(row[cols["omsid"]])
+        # CF: parse to float; #N/A / blank / non-numeric → sort to end
+        try:
+            cf = float(str(row[cols["cf"]]).strip())
+        except (ValueError, TypeError, KeyError):
+            cf = float("inf")
         if not sku:
             continue
-        records.append(SORecord(rank=rank, category=category, sku=sku, description=desc, omsid=omsid))
+        records.append(SORecord(rank=rank, category=category, sku=sku, description=desc, omsid=omsid, cf=cf))
     records.sort(key=lambda r: r.rank)
     return records
 
@@ -527,10 +534,14 @@ def select_so_for_store(
         return None
 
     used_ranks: set = set()
-    selected:   List[SKURecord] = []
+    # Track (cf_value, SKURecord) so we can sort by CF at the end
+    selected_pairs: List[Tuple[float, SKURecord]] = []
+
+    def _sel_count() -> int:
+        return len(selected_pairs)
 
     for rec in so_global_list:
-        if len(selected) >= capacity:
+        if _sel_count() >= capacity:
             break
 
         already_used = rec.rank in used_ranks
@@ -539,10 +550,10 @@ def select_so_for_store(
         if not already_used and not has_conflict:
             # Happy path — take this item directly.
             used_ranks.add(rec.rank)
-            selected.append(SKURecord(
+            selected_pairs.append((rec.cf, SKURecord(
                 sku=rec.sku, description=rec.description,
                 facing=1, sku_type="SO",
-            ))
+            )))
         else:
             # Either already consumed as a prior replacement, or conflicts with
             # this store's stock. Either way, preserve the slot's category:
@@ -552,10 +563,10 @@ def select_so_for_store(
 
             if replacement:
                 used_ranks.add(replacement.rank)
-                selected.append(SKURecord(
+                selected_pairs.append((replacement.cf, SKURecord(
                     sku=replacement.sku, description=replacement.description,
                     facing=1, sku_type="SO",
-                ))
+                )))
                 if has_conflict and not already_used:
                     logger.info(
                         f"Store {store}: replaced conflicting SO rank {rec.rank} "
@@ -571,7 +582,11 @@ def select_so_for_store(
                         store=store,
                     )
 
-    return selected
+    # ── Final step: sort selected SOs by CF (color flow) for shelf placement ──
+    # We tracked CF alongside each selection as (cf_value, SKURecord) pairs.
+    # Items with invalid/missing CF (∞) go to the end.
+    selected_pairs.sort(key=lambda t: t[0])
+    return [t[1] for t in selected_pairs]
 
 
 def expand_facing(records: List[SKURecord]) -> List[SKURecord]:
@@ -911,7 +926,7 @@ st.markdown("""
   <strong>Required sheets in workbook:</strong><br>
   &nbsp;&nbsp;• <code>Store List</code> — Store | Current Store POG | Current LFT | Notes<br>
   &nbsp;&nbsp;• <code>Stock SKUs and Displays</code> — Store | Stock SKU | Stock Desc | ... | Facings | Display SKU | Display Desc | ... | Facings | CF<br>
-  &nbsp;&nbsp;• <code>Special Order Boards</code> — Store | SO SKU | Description | ... | Facings | ... | CF<br><br>
+  &nbsp;&nbsp;• <code>Special Order Boards</code> — Store | SO SKU | Description | ... | Facings | CF<br><br>
   <strong>Bay order:</strong> LFT bays are placed <em>first</em>, then POG bays follow.<br>
   <strong>Facings:</strong> Only 1 or 2 are valid — anything else is clamped to 1.<br>
   <strong>Notes rule:</strong> If Notes contains "baja" or "vigo", those SKUs are pushed to the end.
@@ -964,6 +979,7 @@ if run_clicked:
                 ("Special Orders",  "SKU",                 wb_data.cols_so.get("sku",           "?")),
                 ("Special Orders",  "SKU Description",     wb_data.cols_so.get("sku_desc",      "?")),
                 ("Special Orders",  "OMSID",               wb_data.cols_so.get("omsid",         "?")),
+                ("Special Orders",  "⭐ CF (Color Flow)",  wb_data.cols_so.get("cf",            "?")),
             ]
             st.dataframe(
                 pd.DataFrame(col_rows, columns=["Sheet", "Logical Field", "→ Actual Excel Column Detected"]),
