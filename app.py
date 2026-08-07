@@ -345,6 +345,13 @@ def load_workbook_from_bytes(
         "cf":         _find_col(df_sd, ["CF"], len(sd_cols) - 1, s_sd, logger),
     }
 
+    # Sort Stock & Display sheet by CF (ascending) so allocation is always in
+    # the correct order even if the sheet was saved unsorted.
+    cf_col = cols_sd["cf"]
+    df_sd[cf_col] = pd.to_numeric(df_sd[cf_col], errors="coerce")
+    df_sd.sort_values(by=cf_col, ascending=True, na_position="last", inplace=True)
+    df_sd.reset_index(drop=True, inplace=True)
+
     cols_so = {
         "combined_rank": _find_col(df_so, ["Combined Rank", "Rank", "Combined rank"], 0, s_so, logger),
         "category":      _find_col(df_so, ["Category", "category"], 1, s_so, logger),
