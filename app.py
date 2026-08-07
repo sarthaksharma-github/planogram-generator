@@ -491,10 +491,19 @@ def _build_conflict_set(stock_descs: List[str]) -> List[List[str]]:
 
 
 def _is_so_conflict(so_desc: str, conflict_entries: List[List[str]]) -> bool:
-    """Return True if so_desc matches any conflict entry (all keywords present)."""
-    so_upper = so_desc.upper()
-    for kws in conflict_entries:
-        if all(kw in so_upper for kw in kws):
+    """Return True if so_desc shares ≥2 product keywords with any conflict entry.
+
+    Uses bidirectional keyword-set intersection rather than a one-directional
+    substring check, so a single shared generic word (e.g. 'BIANCO' appearing
+    in both 'CRYSTAL BIANCO' stock and 'BIANCO DOLOMI' SO) does NOT cause a
+    false positive.  Two or more matching keywords are required.
+    """
+    so_kws = set(_extract_product_keywords(so_desc))
+    if not so_kws:
+        return False
+    for stock_kws in conflict_entries:
+        common = so_kws & set(stock_kws)
+        if len(common) >= 2:
             return True
     return False
 
