@@ -58,6 +58,7 @@ class SKURecord:
     description: str
     facing:      int
     sku_type:    str   # "Display" | "SO" | "Stock"
+    match_name:  str = ""  # clean product Name, used only for exact conflict matching
 
 
 @dataclass
@@ -66,10 +67,10 @@ class SORecord:
     rank:        int
     category:    str   # "Stone" | "Wood" (or any string from the sheet)
     sku:         str
-    name:        str   # Clean product name from the Name column (used for conflict matching)
     description: str
     omsid:       str
     cf:          float = 0.0  # Color Flow rank — used to order the final selection
+    name:        str = ""     # clean product Name, used only for exact conflict matching
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -339,13 +340,13 @@ def load_workbook_from_bytes(
     cols_sd = {
         "store":      _find_col(df_sd, ["Store"], 0, s_sd, logger),
         "stock_sku":  _find_col(df_sd, ["Stock SKU", "Stock Sku", "SKU"], 1, s_sd, logger),
-        "stock_name": _find_col(df_sd, ["Name", "Stock Name"], 2, s_sd, logger),
-        "stock_desc": _find_col(df_sd, ["Stock Description", "Stock Desc", "Description"], 3, s_sd, logger),
-        "stock_face": _find_col(df_sd, ["Facings", "Facing", "Stock Facings", "Stock Facing"], 5, s_sd, logger),
-        "disp_sku":   _find_col(df_sd, ["Display SKU", "Display Sku"], 6, s_sd, logger),
-        "disp_desc":  _find_col(df_sd, ["Display Description", "Display Desc"], 7, s_sd, logger),
-        "disp_face":  _find_col(df_sd, ["Display Facing", "Display Facings", "Display", "Facings.1", "Facing.1"], 9 if len(sd_cols) <= 10 else 10, s_sd, logger),
-        "cf":         _find_col(df_sd, ["Final CF", "CF"], len(sd_cols) - 1, s_sd, logger),
+        "stock_desc": _find_col(df_sd, ["Stock Description", "Stock Desc", "Description"], 2, s_sd, logger),
+        "stock_name": _find_col(df_sd, ["Name", "Product Name", "Stock Name"], 2, s_sd, logger),
+        "stock_face": _find_col(df_sd, ["Facings", "Facing", "Stock Facings", "Stock Facing"], 4, s_sd, logger),
+        "disp_sku":   _find_col(df_sd, ["Display SKU", "Display Sku"], 5, s_sd, logger),
+        "disp_desc":  _find_col(df_sd, ["Display Description", "Display Desc"], 6, s_sd, logger),
+        "disp_face":  _find_col(df_sd, ["Display Facing", "Display Facings", "Display", "Facings.1", "Facing.1"], 7 if len(sd_cols) <= 9 else 8, s_sd, logger),
+        "cf":         _find_col(df_sd, ["CF"], len(sd_cols) - 1, s_sd, logger),
     }
 
     # Sort Stock & Display sheet by CF (ascending) so allocation is always in
@@ -359,10 +360,10 @@ def load_workbook_from_bytes(
         "combined_rank": _find_col(df_so, ["Combined Rank", "Rank", "Combined rank"], 0, s_so, logger),
         "category":      _find_col(df_so, ["Category", "category"], 1, s_so, logger),
         "sku":           _find_col(df_so, ["SKU", "Sku"], 2, s_so, logger),
+        "sku_desc":      _find_col(df_so, ["SKU Description", "Description", "Sku Description"], 3, s_so, logger),
         "name":          _find_col(df_so, ["Name", "Product Name"], 3, s_so, logger),
-        "sku_desc":      _find_col(df_so, ["SKU Description", "Description", "Sku Description"], 4, s_so, logger),
-        "omsid":         _find_col(df_so, ["OMSID", "OMS ID", "Omsid"], 5, s_so, logger),
-        "cf":            _find_col(df_so, ["CF", "Color Flow", "CF Rank"], 6, s_so, logger),
+        "omsid":         _find_col(df_so, ["OMSID", "OMS ID", "Omsid"], 4, s_so, logger),
+        "cf":            _find_col(df_so, ["CF", "Color Flow", "CF Rank"], 5, s_so, logger),
     }
 
     return WorkbookData(
@@ -414,10 +415,11 @@ def build_stock_index(df: pd.DataFrame, cols: Dict[str, str], logger: PlanogramL
         store  = _clean_store_id(row[cols["store"]])
         sku    = _str(row[cols["stock_sku"]])
         desc   = _str(row[cols["stock_desc"]])
+        name   = _str(row[cols["stock_name"]]) if "stock_name" in cols else ""
         facing = _parse_facing(row[cols["stock_face"]], store, sku, logger)
         if not store or not sku:
             continue
-        index[store].append(SKURecord(sku=sku, description=desc, facing=facing, sku_type="Stock"))
+        index[store].append(SKURecord(sku=sku, description=desc, facing=facing, sku_type="Stock", match_name=name))
     return dict(index)
 
 
@@ -431,8 +433,8 @@ def build_so_global_list(df: pd.DataFrame, cols: Dict[str, str]) -> List[SORecor
             continue
         category = _str(row[cols["category"]])
         sku      = _str(row[cols["sku"]])
-        name     = _str(row[cols["name"]])
         desc     = _str(row[cols["sku_desc"]])
+        name     = _str(row[cols["name"]]) if "name" in cols else ""
         omsid    = _str(row[cols["omsid"]])
         # CF: parse to float; #N/A / blank / non-numeric → sort to end
         try:
@@ -441,7 +443,7 @@ def build_so_global_list(df: pd.DataFrame, cols: Dict[str, str]) -> List[SORecor
             cf = float("inf")
         if not sku:
             continue
-        records.append(SORecord(rank=rank, category=category, sku=sku, name=name, description=desc, omsid=omsid, cf=cf))
+        records.append(SORecord(rank=rank, category=category, sku=sku, description=desc, omsid=omsid, cf=cf, name=name))
     records.sort(key=lambda r: r.rank)
     return records
 
@@ -451,60 +453,40 @@ def build_so_global_list(df: pd.DataFrame, cols: Dict[str, str]) -> List[SORecor
 # SO conflict-avoidance helpers
 # ---------------------------------------------------------------------------
 
-_RE_WORD_FILTER = re.compile(r"[A-Za-z]")
+def _norm_product_name(name: str) -> str:
+    """Normalize a product Name for exact, case-insensitive comparison.
 
-
-def _extract_product_keywords(desc: str) -> List[str]:
-    """Extract core product name keywords from a SKU description.
-
-    Strategy (handles formats like '9X47 MODENA NATURAL-11.75SF-CA'):
-      1. Drop leading size token  — text before the first space.
-      2. Drop trailing suffix    — text from the first '-' onward.
-      3. Split remaining text on whitespace/underscores.
-      4. Keep only 'proper' words: length >= 3, contains at least one letter,
-         not a pure number string (so '9X47' is kept, '12' is dropped).
+    Collapses repeated whitespace and upper-cases. No fuzzy matching, no
+    keyword extraction — this is a direct string comparison on the clean
+    product Name field (e.g. 'BIANCO DOLOMI'), not the full SKU description.
     """
-    if not isinstance(desc, str) or not desc.strip():
-        return []
-    s = desc.strip()
-    if " " in s:
-        s = s.split(" ", 1)[1].strip()
-    if "-" in s:
-        s = s.split("-", 1)[0].strip()
-    tokens = re.split(r"[\s_/]+", s)
-    keywords: List[str] = []
-    for tok in tokens:
-        tok = tok.strip()
-        if len(tok) >= 3 and _RE_WORD_FILTER.search(tok) and not tok.isdigit():
-            keywords.append(tok.upper())
-    return keywords
+    if not isinstance(name, str) or not name.strip():
+        return ""
+    return re.sub(r"\s+", " ", name.strip()).upper()
 
 
 def _build_conflict_set(stock_names: List[str]) -> set:
-    """Build a set of normalised stock product names for O(1) conflict lookup.
+    """Build the set of normalized stock product Names already in a store.
 
-    Normalisation: strip whitespace, uppercase.  Empty strings are excluded.
+    An SO item conflicts only if its product Name is an exact (case-
+    insensitive) match to one of these — e.g. stock 'CRYSTAL BIANCO' and SO
+    'BIANCO DOLOMI' are distinct products and do NOT conflict, but stock
+    'BIANCO DOLOMI' and SO 'BIANCO DOLOMI' do.
     """
-    result: set = set()
-    for name in stock_names:
-        n = name.strip().upper()
-        if n:
-            result.add(n)
-    return result
+    return {_norm_product_name(n) for n in stock_names if _norm_product_name(n)}
 
 
-def _is_so_conflict(so_name: str, conflict_names: set) -> bool:
-    """Return True if the SO's product Name exactly matches any stock name.
-
-    Uses the explicit Name column from both sheets, so no fuzzy keyword
-    extraction is needed.  Comparison is case-insensitive.
-    """
-    return bool(so_name) and so_name.strip().upper() in conflict_names
+def _is_so_conflict(so_name: str, conflict_entries: set) -> bool:
+    """Return True if so_name exactly matches (case-insensitive) a stock product Name."""
+    norm = _norm_product_name(so_name)
+    if not norm:
+        return False
+    return norm in conflict_entries
 
 
 def select_so_for_store(
     so_global_list: List[SORecord],
-    conflict_names: set,
+    conflict_entries: set,
     capacity: int,
     store: Any,
     logger: PlanogramLogger,
@@ -532,7 +514,7 @@ def select_so_for_store(
                 continue
             if candidate.rank in used_ranks:
                 continue
-            if not _is_so_conflict(candidate.name, conflict_names):
+            if not _is_so_conflict(candidate.name, conflict_entries):
                 return candidate
         return None
 
@@ -548,7 +530,7 @@ def select_so_for_store(
             break
 
         already_used = rec.rank in used_ranks
-        has_conflict = _is_so_conflict(rec.name, conflict_names)
+        has_conflict = _is_so_conflict(rec.name, conflict_entries)
 
         if not already_used and not has_conflict:
             # Happy path — take this item directly.
@@ -570,8 +552,8 @@ def select_so_for_store(
                 if has_conflict and not already_used:
                     logger.info(
                         f"Store {store}: replaced conflicting SO rank {rec.rank} "
-                        f"({rec.category} '{rec.name}') with rank {replacement.rank} "
-                        f"('{replacement.name}')."
+                        f"({rec.category} '{rec.sku}') with rank {replacement.rank} "
+                        f"('{replacement.sku}')."
                     )
             else:
                 # No further item of this category is available.
@@ -799,20 +781,11 @@ def generate_planogram(
         so_capacity = sum(
             BAY_RULES[b].so for b in bay_list if b in BAY_RULES
         )
-        # Conflict set = stock product Names already present in this store
-        stock_names      = [rec.description for rec in raw_stock]   # fallback field
-        # Prefer the explicit name column stored on the SKURecord description
-        # BUT since SKURecord stores description not name, we build conflict from
-        # the raw stock_display sheet directly using the stock_name column.
-        stock_names_raw = [
-            _str(r[wb_data.cols_sd["stock_name"]])
-            for _, r in wb_data.stock_display[
-                wb_data.stock_display[wb_data.cols_sd["store"]].apply(_clean_store_id) == store
-            ].iterrows()
-        ]
-        conflict_names = _build_conflict_set(stock_names_raw)
+        # Conflict set = exact product Names already present in this store's stock
+        stock_names       = [rec.match_name for rec in raw_stock]
+        conflict_entries = _build_conflict_set(stock_names)
         raw_so = select_so_for_store(
-            so_global_list, conflict_names, so_capacity, store, logger
+            so_global_list, conflict_entries, so_capacity, store, logger
         )
         if not raw_so:
             logger.warning(f"No SO SKUs could be selected for store {store}.", store=store)
@@ -1004,8 +977,8 @@ if run_clicked:
                 ("Store List",      "Notes",               wb_data.cols_sl.get("notes", "?")),
                 ("Stock & Display", "Store ID",            wb_data.cols_sd.get("store",      "?")),
                 ("Stock & Display", "Stock SKU",           wb_data.cols_sd.get("stock_sku",  "?")),
-                ("Stock & Display", "⭐ Stock Name",       wb_data.cols_sd.get("stock_name", "?")),
                 ("Stock & Display", "Stock Description",   wb_data.cols_sd.get("stock_desc", "?")),
+                ("Stock & Display", "⭐ Product Name (exact-match)", wb_data.cols_sd.get("stock_name", "?")),
                 ("Stock & Display", "⭐ Stock Facing",     wb_data.cols_sd.get("stock_face", "?")),
                 ("Stock & Display", "Display SKU",         wb_data.cols_sd.get("disp_sku",   "?")),
                 ("Stock & Display", "Display Description", wb_data.cols_sd.get("disp_desc",  "?")),
@@ -1014,8 +987,8 @@ if run_clicked:
                 ("Special Orders",  "Combined Rank",       wb_data.cols_so.get("combined_rank", "?")),
                 ("Special Orders",  "Category",            wb_data.cols_so.get("category",      "?")),
                 ("Special Orders",  "SKU",                 wb_data.cols_so.get("sku",           "?")),
-                ("Special Orders",  "⭐ Name",             wb_data.cols_so.get("name",          "?")),
                 ("Special Orders",  "SKU Description",     wb_data.cols_so.get("sku_desc",      "?")),
+                ("Special Orders",  "⭐ Product Name (exact-match)", wb_data.cols_so.get("name", "?")),
                 ("Special Orders",  "OMSID",               wb_data.cols_so.get("omsid",         "?")),
                 ("Special Orders",  "⭐ CF (Color Flow)",  wb_data.cols_so.get("cf",            "?")),
             ]
