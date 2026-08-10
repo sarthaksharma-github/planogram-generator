@@ -340,13 +340,13 @@ def load_workbook_from_bytes(
     cols_sd = {
         "store":      _find_col(df_sd, ["Store"], 0, s_sd, logger),
         "stock_sku":  _find_col(df_sd, ["Stock SKU", "Stock Sku", "SKU"], 1, s_sd, logger),
-        "stock_desc": _find_col(df_sd, ["Stock Description", "Stock Desc", "Description"], 2, s_sd, logger),
-        "stock_name": _find_col(df_sd, ["Name", "Product Name", "Stock Name"], 2, s_sd, logger),
-        "stock_face": _find_col(df_sd, ["Facings", "Facing", "Stock Facings", "Stock Facing"], 4, s_sd, logger),
-        "disp_sku":   _find_col(df_sd, ["Display SKU", "Display Sku"], 5, s_sd, logger),
-        "disp_desc":  _find_col(df_sd, ["Display Description", "Display Desc"], 6, s_sd, logger),
-        "disp_face":  _find_col(df_sd, ["Display Facing", "Display Facings", "Display", "Facings.1", "Facing.1"], 7 if len(sd_cols) <= 9 else 8, s_sd, logger),
-        "cf":         _find_col(df_sd, ["CF"], len(sd_cols) - 1, s_sd, logger),
+        "stock_name": _find_col(df_sd, ["Name", "Stock Name", "Product Name"], 2, s_sd, logger),
+        "stock_desc": _find_col(df_sd, ["Stock Description", "Stock Desc", "Description"], 3, s_sd, logger),
+        "stock_face": _find_col(df_sd, ["Facings", "Facing", "Stock Facings", "Stock Facing"], 5, s_sd, logger),
+        "disp_sku":   _find_col(df_sd, ["Display SKU", "Display Sku"], 6, s_sd, logger),
+        "disp_desc":  _find_col(df_sd, ["Display Description", "Display Desc"], 7, s_sd, logger),
+        "disp_face":  _find_col(df_sd, ["Display Facing", "Display Facings", "Display", "Facings.1", "Facing.1"], 9 if len(sd_cols) <= 11 else 10, s_sd, logger),
+        "cf":         _find_col(df_sd, ["Final CF", "CF"], len(sd_cols) - 1, s_sd, logger),
     }
 
     # Sort Stock & Display sheet by CF (ascending) so allocation is always in
@@ -360,10 +360,10 @@ def load_workbook_from_bytes(
         "combined_rank": _find_col(df_so, ["Combined Rank", "Rank", "Combined rank"], 0, s_so, logger),
         "category":      _find_col(df_so, ["Category", "category"], 1, s_so, logger),
         "sku":           _find_col(df_so, ["SKU", "Sku"], 2, s_so, logger),
-        "sku_desc":      _find_col(df_so, ["SKU Description", "Description", "Sku Description"], 3, s_so, logger),
         "name":          _find_col(df_so, ["Name", "Product Name"], 3, s_so, logger),
-        "omsid":         _find_col(df_so, ["OMSID", "OMS ID", "Omsid"], 4, s_so, logger),
-        "cf":            _find_col(df_so, ["CF", "Color Flow", "CF Rank"], 5, s_so, logger),
+        "sku_desc":      _find_col(df_so, ["SKU Description", "Description", "Sku Description"], 4, s_so, logger),
+        "omsid":         _find_col(df_so, ["OMSID", "OMS ID", "Omsid"], 5, s_so, logger),
+        "cf":            _find_col(df_so, ["CF", "Color Flow", "CF Rank"], 6, s_so, logger),
     }
 
     return WorkbookData(
