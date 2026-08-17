@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Tuple
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook as _openpyxl_load
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -818,13 +818,15 @@ def generate_planogram(
 # SECTION 8 — STORE LIST WITH POG NAME & AMT REPORT BUILDERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 8 — STORE LIST & AMT EXECUTIVE DASHBOARD BUILDER
+# ══════════════════════════════════════════════════════════════════════════════
+
 def _make_pog_name(pog_raw: str, lft_raw: str) -> str:
     """Compute the POG Name label for one store.
 
     Combines LFT bays (if any) + POG bays into one ordered list, then
     formats as:  '{n} Bay - Reflow Stores ({bay1},{bay2},...)'.
-
-    Uses a silent logger so parse errors don't pollute the validation sheet.
     """
     lft_bays: List[str] = []
     if _str(lft_raw).lower() not in LFT_IGNORE_VALUES:
@@ -837,11 +839,11 @@ def _make_pog_name(pog_raw: str, lft_raw: str) -> str:
 
 
 def build_store_list_with_pog_name(wb_data: "WorkbookData") -> pd.DataFrame:
-    """Return a copy of the Store List sheet with a 'POG Name' column appended."""
+    """Return a copy of the Store List sheet with 'POG Name' inserted as Column B."""
     df = wb_data.store_list.copy()
     cols = wb_data.cols_sl
-    pog_col   = cols.get("pog",   "")
-    lft_col   = cols.get("lft",   "")
+    pog_col = cols.get("pog", "")
+    lft_col = cols.get("lft", "")
 
     pog_names: List[str] = []
     for _, row in df.iterrows():
@@ -849,90 +851,60 @@ def build_store_list_with_pog_name(wb_data: "WorkbookData") -> pd.DataFrame:
         lft_raw = _str(row[lft_col]) if lft_col and lft_col in df.columns else ""
         pog_names.append(_make_pog_name(pog_raw, lft_raw))
 
-    df.insert(len(df.columns), "POG Name", pog_names)
+    # Insert right after Store (column index 1)
+    insert_pos = 1 if len(df.columns) > 1 else len(df.columns)
+    df.insert(insert_pos, "POG Name", pog_names)
     return df
 
 
-def build_amt_report(
-    store_list_df: pd.DataFrame,
-    planogram_df: pd.DataFrame,
-    wb_data: "WorkbookData",
-) -> pd.DataFrame:
-    """Build the AMT report: groups stores sharing the same POG Name AND the
-    exact same set of Stock SKUs (regardless of order).
-
-    Columns: POG Name | Stock SKUs | Store Count | Stores
-    """
-    store_col = wb_data.cols_sl.get("store", "")
-
-    # Build per-store Stock SKU set (order-independent, unique SKUs)
-    stock_sku_sets: Dict[str, tuple] = {}
-    if not planogram_df.empty:
-        stock_rows = planogram_df[planogram_df["SKU Type"] == "Stock"].copy()
-        for store_id, grp in stock_rows.groupby("Store", sort=False):
-            # Extract distinct SKUs and sort canonically for order-independent matching
-            unique_skus = sorted(set(grp["SKU"].dropna().astype(str)))
-            stock_sku_sets[str(store_id)] = tuple(unique_skus)
-
-    # Build a POG-Name lookup from the store-list dataframe
-    pog_name_by_store: Dict[str, str] = {}
-    if store_col and store_col in store_list_df.columns:
-        for _, row in store_list_df.iterrows():
-            sid = _clean_store_id(row[store_col])
-            if sid:
-                pog_name_by_store[sid] = _str(row.get("POG Name", ""))
-
-    # Group by (pog_name, canonical_sku_tuple)
-    groups: Dict[tuple, List[str]] = defaultdict(list)
-    for sid, sku_tuple in stock_sku_sets.items():
-        pog_name = pog_name_by_store.get(sid, "")
-        groups[(pog_name, sku_tuple)].append(sid)
-
-    rows = []
-    for (pog_name, sku_tuple), store_ids in sorted(groups.items(), key=lambda x: (-len(x[1]), x[0][0])):
-        rows.append({
-            "POG Name":        pog_name,
-            "Stock SKUs":      ", ".join(sku_tuple),
-            "Store Count":     len(store_ids),
-            "Stores":          ", ".join(sorted(store_ids, key=lambda s: s.zfill(20))),
-        })
-
-    return pd.DataFrame(rows, columns=["POG Name", "Stock SKUs", "Store Count", "Stores"])
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — EXCEL WRITER
+# SECTION 9 — EXCEL WRITER & SHEET STYLES
 # ══════════════════════════════════════════════════════════════════════════════
 
-_HEADER_FONT  = Font(bold=True, color="FFFFFF")
-_HD_ORANGE    = PatternFill(fill_type="solid", fgColor="F96302")
-_ERROR_RED    = PatternFill(fill_type="solid", fgColor="CC0000")
-_HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_NAVY_FILL         = PatternFill(fill_type="solid", fgColor="1F4E79")
+_LIGHT_GREEN_FILL  = PatternFill(fill_type="solid", fgColor="E2EFDA")
+_HD_ORANGE         = PatternFill(fill_type="solid", fgColor="F96302")
+_ERROR_RED         = PatternFill(fill_type="solid", fgColor="CC0000")
+
+_TITLE_FONT        = Font(name="Calibri", size=13, bold=True, color="1F4E79")
+_SECTION_FONT      = Font(name="Calibri", size=11, bold=True, color="1F4E79")
+_WHITE_FONT_BOLD   = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+_KPI_LABEL_FONT    = Font(name="Calibri", size=10, bold=False, color="000000")
+_KPI_VAL_FONT      = Font(name="Calibri", size=10, bold=True, color="000000")
+_DATA_FONT         = Font(name="Calibri", size=10, bold=False, color="000000")
+_DATA_FONT_BOLD    = Font(name="Calibri", size=10, bold=True, color="000000")
+
+_ALIGN_LEFT        = Alignment(horizontal="left", vertical="center")
+_ALIGN_CENTER      = Alignment(horizontal="center", vertical="center")
+_ALIGN_RIGHT       = Alignment(horizontal="right", vertical="center")
+_HEADER_ALIGN      = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+_THIN_SIDE         = Side(border_style="thin", color="D9D9D9")
+_CELL_BORDER       = Border(left=_THIN_SIDE, right=_THIN_SIDE, top=_THIN_SIDE, bottom=_THIN_SIDE)
 
 
-def _style_header(ws, fill: PatternFill = _HD_ORANGE) -> None:
+def _style_header(ws, fill: PatternFill = _NAVY_FILL) -> None:
     for cell in ws[1]:
-        cell.font      = _HEADER_FONT
+        cell.font      = _WHITE_FONT_BOLD
         cell.fill      = fill
         cell.alignment = _HEADER_ALIGN
-    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[1].height = 24
 
 
-def _auto_width(ws, max_width: int = 60) -> None:
+def _auto_width(ws, max_width: int = 70) -> None:
     for col_cells in ws.columns:
         length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in col_cells)
-        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(length + 3, max_width)
+        col_letter = get_column_letter(col_cells[0].column)
+        ws.column_dimensions[col_letter].width = min(max(length + 3, 10), max_width)
 
 
 def _write_df_to_sheet(
     wb,
     sheet_title: str,
     df: pd.DataFrame,
-    fill: "PatternFill" = None,
+    fill: PatternFill = _NAVY_FILL,
 ) -> None:
     """Create (or replace) a sheet in wb and write df into it with header styling."""
-    if fill is None:
-        fill = _HD_ORANGE
     if sheet_title in wb.sheetnames:
         del wb[sheet_title]
     ws = wb.create_sheet(title=sheet_title)
@@ -944,8 +916,226 @@ def _write_df_to_sheet(
     ws.freeze_panes = "A2"
 
 
-_HD_BLUE  = PatternFill(fill_type="solid", fgColor="1F4E79")
-_HD_GREEN = PatternFill(fill_type="solid", fgColor="375623")
+def _write_amt_sheet(
+    wb,
+    store_list_df: pd.DataFrame,
+    planogram_df: pd.DataFrame,
+    wb_data: "WorkbookData",
+) -> None:
+    """Generate the executive AMT dashboard tab with KPIs, Shared Groups, and Detail."""
+    if "AMT" in wb.sheetnames:
+        del wb["AMT"]
+    ws = wb.create_sheet(title="AMT")
+
+    store_col = wb_data.cols_sl.get("store", "")
+
+    # 1. Build per-store stock SKU sequences from planogram_df
+    stock_sku_seq: Dict[str, List[str]] = {}
+    if not planogram_df.empty:
+        stock_rows = planogram_df[planogram_df["SKU Type"] == "Stock"].copy()
+        for store_id, grp in stock_rows.groupby("Store", sort=False):
+            stock_sku_seq[str(store_id)] = grp["SKU"].dropna().astype(str).tolist()
+
+    # 2. Pre-extract store info from store_list_df in original order
+    store_info_list: List[Dict[str, Any]] = []
+    for _, row in store_list_df.iterrows():
+        sid = _clean_store_id(row[store_col]) if store_col and store_col in row else ""
+        if not sid:
+            continue
+        pog_name = _str(row.get("POG Name", ""))
+        skus = stock_sku_seq.get(sid, [])
+        # Canonical set of SKUs (order-independent set match)
+        sku_set = tuple(sorted(set(skus)))
+        store_info_list.append({
+            "store": sid,
+            "pog_name": pog_name,
+            "skus": skus,
+            "sku_count": len(skus),
+            "sku_set": sku_set,
+            "group_key": (pog_name, sku_set),
+            "full_flow": ", ".join(skus),
+            "preview_flow": ", ".join(skus[:10]) + ("..." if len(skus) > 10 else ""),
+        })
+
+    # 3. Group by (pog_name, sku_set)
+    clusters: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
+    for info in store_info_list:
+        clusters[info["group_key"]].append(info)
+
+    shared_clusters: List[Tuple[tuple, List[Dict[str, Any]]]] = []
+    unique_clusters: List[Tuple[tuple, List[Dict[str, Any]]]] = []
+    for k, v in clusters.items():
+        if len(v) >= 2:
+            shared_clusters.append((k, v))
+        else:
+            unique_clusters.append((k, v))
+
+    # Sort shared clusters descending by store count
+    shared_clusters.sort(key=lambda x: -len(x[1]))
+
+    # Assign Config Group # numbers: 1..S for shared, S+1..N for unique
+    group_num_map: Dict[tuple, int] = {}
+    cur_num = 1
+    for k, v in shared_clusters:
+        group_num_map[k] = cur_num
+        cur_num += 1
+    for k, v in unique_clusters:
+        group_num_map[k] = cur_num
+        cur_num += 1
+
+    total_stores = len(store_info_list)
+    total_unique_configs = len(clusters)
+    shared_configs_count = len(shared_clusters)
+    stores_in_shared_count = sum(len(v) for _, v in shared_clusters)
+    stores_with_unique_count = sum(len(v) for _, v in unique_clusters)
+
+    # ── Title (Row 1) ──────────────────────────────────────────────────
+    ws["A1"] = "AMT - Identical POG Layout & Stock SKU Flow Analysis"
+    ws["A1"].font = _TITLE_FONT
+    ws.row_dimensions[1].height = 24
+
+    # ── Section 1: KPIs (Rows 3-9) ─────────────────────────────────────
+    ws["A3"] = "Key Performance Indicators (KPIs)"
+    ws["A3"].font = _SECTION_FONT
+
+    kpi_headers = ["Metric", "Value"]
+    for c_idx, h in enumerate(kpi_headers, start=1):
+        cell = ws.cell(row=4, column=c_idx, value=h)
+        cell.font = _WHITE_FONT_BOLD
+        cell.fill = _NAVY_FILL
+        cell.alignment = _ALIGN_LEFT if c_idx == 1 else _ALIGN_RIGHT
+        cell.border = _CELL_BORDER
+    ws.row_dimensions[4].height = 20
+
+    kpis = [
+        ("Total Stores Analyzed", total_stores),
+        ("Total Unique Flow Configurations", total_unique_configs),
+        ("Configurations Shared by 2+ Stores", shared_configs_count),
+        ("Stores in Shared Flow Configurations", stores_in_shared_count),
+        ("Stores with Unique Configurations", stores_with_unique_count),
+    ]
+
+    for r_offset, (label, val) in enumerate(kpis, start=5):
+        cA = ws.cell(row=r_offset, column=1, value=label)
+        cB = ws.cell(row=r_offset, column=2, value=val)
+        cA.font = _KPI_LABEL_FONT
+        cA.alignment = _ALIGN_LEFT
+        cA.border = _CELL_BORDER
+        cB.font = _KPI_VAL_FONT
+        cB.alignment = _ALIGN_RIGHT
+        cB.border = _CELL_BORDER
+        ws.row_dimensions[r_offset].height = 19
+
+    # ── Section 2: Shared Configurations (Rows 12+) ────────────────────
+    ws["A12"] = "Summary of Shared Configurations (Groups with 2+ Stores)"
+    ws["A12"].font = _SECTION_FONT
+
+    sum_headers = [
+        "Config Group #",
+        "POG Name",
+        "# Stores with Identical Flow",
+        "Matching Store Numbers",
+        "# Stock SKUs in Flow",
+        "Stock SKU Flow Preview (First 10 SKUs)",
+    ]
+    for c_idx, h in enumerate(sum_headers, start=1):
+        cell = ws.cell(row=13, column=c_idx, value=h)
+        cell.font = _WHITE_FONT_BOLD
+        cell.fill = _NAVY_FILL
+        cell.alignment = _ALIGN_CENTER if c_idx in (1, 3, 5) else _ALIGN_LEFT
+        cell.border = _CELL_BORDER
+    ws.row_dimensions[13].height = 24
+
+    cur_row = 14
+    for k, v in shared_clusters:
+        grp_num = group_num_map[k]
+        pog_name = v[0]["pog_name"]
+        store_count = len(v)
+        store_nums = ", ".join(s["store"] for s in v)
+        sku_count = v[0]["sku_count"]
+        preview = v[0]["preview_flow"]
+
+        row_vals = [grp_num, pog_name, store_count, store_nums, sku_count, preview]
+        for c_idx, val in enumerate(row_vals, start=1):
+            cell = ws.cell(row=cur_row, column=c_idx, value=val)
+            cell.font = _DATA_FONT_BOLD if c_idx in (1, 3) else _DATA_FONT
+            cell.border = _CELL_BORDER
+            if c_idx == 3:
+                cell.fill = _LIGHT_GREEN_FILL
+                cell.alignment = _ALIGN_CENTER
+            elif c_idx in (1, 5):
+                cell.alignment = _ALIGN_CENTER
+            else:
+                cell.alignment = _ALIGN_LEFT
+        ws.row_dimensions[cur_row].height = 19
+        cur_row += 1
+
+    # Spacing before Section 3
+    cur_row += 2
+
+    # ── Section 3: Store-by-Store Detail Table ─────────────────────────
+    ws.cell(
+        row=cur_row,
+        column=1,
+        value=f"Store-by-Store Flow Matching Detail (All {total_stores} Stores)",
+    ).font = _SECTION_FONT
+    cur_row += 1
+
+    detail_headers = [
+        "Store",
+        "POG Name",
+        "# Stock SKUs",
+        "Config Group #",
+        "# Stores with Identical Flow",
+        "Matching Stores List",
+        "Exact Stock SKU Flow (Full Ordered Sequence)",
+    ]
+    hdr_row = cur_row
+    for c_idx, h in enumerate(detail_headers, start=1):
+        cell = ws.cell(row=hdr_row, column=c_idx, value=h)
+        cell.font = _WHITE_FONT_BOLD
+        cell.fill = _NAVY_FILL
+        cell.alignment = _ALIGN_CENTER if c_idx in (1, 3, 4, 5) else _ALIGN_LEFT
+        cell.border = _CELL_BORDER
+    ws.row_dimensions[hdr_row].height = 24
+    cur_row += 1
+
+    for info in store_info_list:
+        k = info["group_key"]
+        grp_num = group_num_map[k]
+        matching_cluster = clusters[k]
+        matching_count = len(matching_cluster)
+        matching_stores_str = ", ".join(s["store"] for s in matching_cluster)
+
+        row_vals = [
+            info["store"],
+            info["pog_name"],
+            info["sku_count"],
+            grp_num,
+            matching_count,
+            matching_stores_str,
+            info["full_flow"],
+        ]
+        for c_idx, val in enumerate(row_vals, start=1):
+            cell = ws.cell(row=cur_row, column=c_idx, value=val)
+            cell.font = _DATA_FONT
+            cell.border = _CELL_BORDER
+            if c_idx in (1, 3, 4, 5):
+                cell.alignment = _ALIGN_CENTER
+            else:
+                cell.alignment = _ALIGN_LEFT
+        ws.row_dimensions[cur_row].height = 19
+        cur_row += 1
+
+    # Auto column widths
+    _auto_width(ws, max_width=80)
+    ws.column_dimensions["A"].width = 16
+    ws.column_dimensions["B"].width = 44
+    ws.column_dimensions["C"].width = 28
+    ws.column_dimensions["D"].width = 26
+    ws.column_dimensions["E"].width = 26
+    ws.column_dimensions["F"].width = 40
+    ws.column_dimensions["G"].width = 75
 
 
 def write_output_bytes(
@@ -956,22 +1146,37 @@ def write_output_bytes(
 ) -> bytes:
     wb = _openpyxl_load(BytesIO(input_bytes))
 
-    # ── 1. Generated Planogram ─────────────────────────────────────────────────
+    # ── 1. Generated Planogram Sheet ───────────────────────────────────────────
     _write_df_to_sheet(wb, OUTPUT_SHEET_PLANOGRAM, planogram_df, fill=_HD_ORANGE)
 
-    # ── 2. Validation ──────────────────────────────────────────────────────────
+    # ── 2. Validation Sheet ───────────────────────────────────────────────────
     val_cols = ["Level", "Store", "Bay#", "Message"]
     val_df   = validation_df.reindex(columns=val_cols).fillna("")
     _write_df_to_sheet(wb, OUTPUT_SHEET_VALIDATION, val_df, fill=_ERROR_RED)
 
-    # ── 3. Store List with POG Name ────────────────────────────────────────────
+    # ── 3. Update 'Store List' Sheet with 'POG Name' (Col B) ───────────────────
     if wb_data is not None:
         store_pog_df = build_store_list_with_pog_name(wb_data)
-        _write_df_to_sheet(wb, OUTPUT_SHEET_STORE_POG, store_pog_df, fill=_HD_BLUE)
+        _write_df_to_sheet(wb, "Store List", store_pog_df, fill=_NAVY_FILL)
 
-        # ── 4. AMT Report ──────────────────────────────────────────────────────
-        amt_df = build_amt_report(store_pog_df, planogram_df, wb_data)
-        _write_df_to_sheet(wb, OUTPUT_SHEET_AMT, amt_df, fill=_HD_GREEN)
+        # ── 4. AMT Executive Dashboard Sheet ──────────────────────────────────
+        _write_amt_sheet(wb, store_pog_df, planogram_df, wb_data)
+
+    # ── 5. Reorder Tabs to match expected sequence ─────────────────────────────
+    # Expected order: AMT -> Store List -> Stock SKUs and Displays -> Special Order Boards -> Generated Planogram
+    desired_tab_order = [
+        "AMT",
+        "Store List",
+        SHEET_STOCK_DISPLAY,
+        "Stock SKUs and Displays",
+        SHEET_SO,
+        "Special Order Boards",
+        OUTPUT_SHEET_PLANOGRAM,
+        OUTPUT_SHEET_VALIDATION,
+    ]
+    wb._sheets.sort(
+        key=lambda s: desired_tab_order.index(s.title) if s.title in desired_tab_order else 99
+    )
 
     output_bio = BytesIO()
     wb.save(output_bio)
@@ -980,7 +1185,7 @@ def write_output_bytes(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — STREAMLIT UI
+# SECTION 10 — STREAMLIT UI
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.markdown("""
