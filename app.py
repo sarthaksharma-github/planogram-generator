@@ -859,19 +859,20 @@ def build_amt_report(
     wb_data: "WorkbookData",
 ) -> pd.DataFrame:
     """Build the AMT report: groups stores sharing the same POG Name AND the
-    same ordered Stock SKU sequence.
+    exact same set of Stock SKUs (regardless of order).
 
-    Columns: POG Name | Stock SKU Flow | Store Count | Stores
+    Columns: POG Name | Stock SKUs | Store Count | Stores
     """
     store_col = wb_data.cols_sl.get("store", "")
 
-    # Build per-store Stock SKU sequence (ordered as they appear in the planogram)
-    stock_seq: Dict[str, str] = {}
+    # Build per-store Stock SKU set (order-independent, unique SKUs)
+    stock_sku_sets: Dict[str, tuple] = {}
     if not planogram_df.empty:
         stock_rows = planogram_df[planogram_df["SKU Type"] == "Stock"].copy()
         for store_id, grp in stock_rows.groupby("Store", sort=False):
-            skus = grp["SKU"].tolist()
-            stock_seq[str(store_id)] = " | ".join(skus)
+            # Extract distinct SKUs and sort canonically for order-independent matching
+            unique_skus = sorted(set(grp["SKU"].dropna().astype(str)))
+            stock_sku_sets[str(store_id)] = tuple(unique_skus)
 
     # Build a POG-Name lookup from the store-list dataframe
     pog_name_by_store: Dict[str, str] = {}
@@ -881,22 +882,22 @@ def build_amt_report(
             if sid:
                 pog_name_by_store[sid] = _str(row.get("POG Name", ""))
 
-    # Group by (pog_name, stock_sku_flow)
+    # Group by (pog_name, canonical_sku_tuple)
     groups: Dict[tuple, List[str]] = defaultdict(list)
-    for sid, seq in stock_seq.items():
+    for sid, sku_tuple in stock_sku_sets.items():
         pog_name = pog_name_by_store.get(sid, "")
-        groups[(pog_name, seq)].append(sid)
+        groups[(pog_name, sku_tuple)].append(sid)
 
     rows = []
-    for (pog_name, seq), store_ids in sorted(groups.items(), key=lambda x: (-len(x[1]), x[0][0])):
+    for (pog_name, sku_tuple), store_ids in sorted(groups.items(), key=lambda x: (-len(x[1]), x[0][0])):
         rows.append({
             "POG Name":        pog_name,
-            "Stock SKU Flow":  seq,
+            "Stock SKUs":      ", ".join(sku_tuple),
             "Store Count":     len(store_ids),
-            "Stores":          ", ".join(sorted(store_ids, key=lambda s: (s.zfill(20)))),
+            "Stores":          ", ".join(sorted(store_ids, key=lambda s: s.zfill(20))),
         })
 
-    return pd.DataFrame(rows, columns=["POG Name", "Stock SKU Flow", "Store Count", "Stores"])
+    return pd.DataFrame(rows, columns=["POG Name", "Stock SKUs", "Store Count", "Stores"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
