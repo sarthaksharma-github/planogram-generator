@@ -105,6 +105,8 @@ SHEET_SO            = "Special Order Boards"
 # Output sheet names
 OUTPUT_SHEET_PLANOGRAM  = "Generated Planogram"
 OUTPUT_SHEET_VALIDATION = "Validation"
+OUTPUT_SHEET_STORE_POG  = "Store List (POG)"
+OUTPUT_SHEET_AMT        = "AMT"
 
 # Output column order
 PLANOGRAM_COLUMNS: List[str] = [
@@ -813,7 +815,92 @@ def generate_planogram(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — EXCEL WRITER
+# SECTION 8 — STORE LIST WITH POG NAME & AMT REPORT BUILDERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _make_pog_name(pog_raw: str, lft_raw: str) -> str:
+    """Compute the POG Name label for one store.
+
+    Combines LFT bays (if any) + POG bays into one ordered list, then
+    formats as:  '{n} Bay - Reflow Stores ({bay1},{bay2},...)'.
+
+    Uses a silent logger so parse errors don't pollute the validation sheet.
+    """
+    lft_bays: List[str] = []
+    if _str(lft_raw).lower() not in LFT_IGNORE_VALUES:
+        lft_bays = parse_pog_string(_str(lft_raw), logger=None) or []
+    pog_bays = parse_pog_string(_str(pog_raw), logger=None) or []
+    all_bays = lft_bays + pog_bays
+    if not all_bays:
+        return ""
+    return f"{len(all_bays)} Bay - Reflow Stores ({','.join(all_bays)})"
+
+
+def build_store_list_with_pog_name(wb_data: "WorkbookData") -> pd.DataFrame:
+    """Return a copy of the Store List sheet with a 'POG Name' column appended."""
+    df = wb_data.store_list.copy()
+    cols = wb_data.cols_sl
+    pog_col   = cols.get("pog",   "")
+    lft_col   = cols.get("lft",   "")
+
+    pog_names: List[str] = []
+    for _, row in df.iterrows():
+        pog_raw = _str(row[pog_col]) if pog_col and pog_col in df.columns else ""
+        lft_raw = _str(row[lft_col]) if lft_col and lft_col in df.columns else ""
+        pog_names.append(_make_pog_name(pog_raw, lft_raw))
+
+    df.insert(len(df.columns), "POG Name", pog_names)
+    return df
+
+
+def build_amt_report(
+    store_list_df: pd.DataFrame,
+    planogram_df: pd.DataFrame,
+    wb_data: "WorkbookData",
+) -> pd.DataFrame:
+    """Build the AMT report: groups stores sharing the same POG Name AND the
+    same ordered Stock SKU sequence.
+
+    Columns: POG Name | Stock SKU Flow | Store Count | Stores
+    """
+    store_col = wb_data.cols_sl.get("store", "")
+
+    # Build per-store Stock SKU sequence (ordered as they appear in the planogram)
+    stock_seq: Dict[str, str] = {}
+    if not planogram_df.empty:
+        stock_rows = planogram_df[planogram_df["SKU Type"] == "Stock"].copy()
+        for store_id, grp in stock_rows.groupby("Store", sort=False):
+            skus = grp["SKU"].tolist()
+            stock_seq[str(store_id)] = " | ".join(skus)
+
+    # Build a POG-Name lookup from the store-list dataframe
+    pog_name_by_store: Dict[str, str] = {}
+    if store_col and store_col in store_list_df.columns:
+        for _, row in store_list_df.iterrows():
+            sid = _clean_store_id(row[store_col])
+            if sid:
+                pog_name_by_store[sid] = _str(row.get("POG Name", ""))
+
+    # Group by (pog_name, stock_sku_flow)
+    groups: Dict[tuple, List[str]] = defaultdict(list)
+    for sid, seq in stock_seq.items():
+        pog_name = pog_name_by_store.get(sid, "")
+        groups[(pog_name, seq)].append(sid)
+
+    rows = []
+    for (pog_name, seq), store_ids in sorted(groups.items(), key=lambda x: (-len(x[1]), x[0][0])):
+        rows.append({
+            "POG Name":        pog_name,
+            "Stock SKU Flow":  seq,
+            "Store Count":     len(store_ids),
+            "Stores":          ", ".join(sorted(store_ids, key=lambda s: (s.zfill(20)))),
+        })
+
+    return pd.DataFrame(rows, columns=["POG Name", "Stock SKU Flow", "Store Count", "Stores"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 9 — EXCEL WRITER
 # ══════════════════════════════════════════════════════════════════════════════
 
 _HEADER_FONT  = Font(bold=True, color="FFFFFF")
@@ -836,33 +923,54 @@ def _auto_width(ws, max_width: int = 60) -> None:
         ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(length + 3, max_width)
 
 
+def _write_df_to_sheet(
+    wb,
+    sheet_title: str,
+    df: pd.DataFrame,
+    fill: "PatternFill" = None,
+) -> None:
+    """Create (or replace) a sheet in wb and write df into it with header styling."""
+    if fill is None:
+        fill = _HD_ORANGE
+    if sheet_title in wb.sheetnames:
+        del wb[sheet_title]
+    ws = wb.create_sheet(title=sheet_title)
+    ws.append(list(df.columns))
+    for _, row in df.iterrows():
+        ws.append([_str(row[c]) if not isinstance(row[c], (int, float)) else row[c] for c in df.columns])
+    _style_header(ws, fill=fill)
+    _auto_width(ws)
+    ws.freeze_panes = "A2"
+
+
+_HD_BLUE  = PatternFill(fill_type="solid", fgColor="1F4E79")
+_HD_GREEN = PatternFill(fill_type="solid", fgColor="375623")
+
+
 def write_output_bytes(
     input_bytes: bytes,
     planogram_df: pd.DataFrame,
     validation_df: pd.DataFrame,
+    wb_data: "WorkbookData | None" = None,
 ) -> bytes:
     wb = _openpyxl_load(BytesIO(input_bytes))
 
-    for name in [OUTPUT_SHEET_PLANOGRAM, OUTPUT_SHEET_VALIDATION]:
-        if name in wb.sheetnames:
-            del wb[name]
+    # ── 1. Generated Planogram ─────────────────────────────────────────────────
+    _write_df_to_sheet(wb, OUTPUT_SHEET_PLANOGRAM, planogram_df, fill=_HD_ORANGE)
 
-    ws_pog = wb.create_sheet(title=OUTPUT_SHEET_PLANOGRAM)
-    ws_pog.append(PLANOGRAM_COLUMNS)
-    for _, row in planogram_df.iterrows():
-        ws_pog.append([row[col] for col in PLANOGRAM_COLUMNS])
-    _style_header(ws_pog, fill=_HD_ORANGE)
-    _auto_width(ws_pog)
-    ws_pog.freeze_panes = "A2"
+    # ── 2. Validation ──────────────────────────────────────────────────────────
+    val_cols = ["Level", "Store", "Bay#", "Message"]
+    val_df   = validation_df.reindex(columns=val_cols).fillna("")
+    _write_df_to_sheet(wb, OUTPUT_SHEET_VALIDATION, val_df, fill=_ERROR_RED)
 
-    val_cols: List[str] = ["Level", "Store", "Bay#", "Message"]
-    ws_val = wb.create_sheet(title=OUTPUT_SHEET_VALIDATION)
-    ws_val.append(val_cols)
-    for _, row in validation_df.iterrows():
-        ws_val.append([_str(row.get(c, "")) for c in val_cols])
-    _style_header(ws_val, fill=_ERROR_RED)
-    _auto_width(ws_val)
-    ws_val.freeze_panes = "A2"
+    # ── 3. Store List with POG Name ────────────────────────────────────────────
+    if wb_data is not None:
+        store_pog_df = build_store_list_with_pog_name(wb_data)
+        _write_df_to_sheet(wb, OUTPUT_SHEET_STORE_POG, store_pog_df, fill=_HD_BLUE)
+
+        # ── 4. AMT Report ──────────────────────────────────────────────────────
+        amt_df = build_amt_report(store_pog_df, planogram_df, wb_data)
+        _write_df_to_sheet(wb, OUTPUT_SHEET_AMT, amt_df, fill=_HD_GREEN)
 
     output_bio = BytesIO()
     wb.save(output_bio)
@@ -876,56 +984,221 @@ def write_output_bytes(
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-[data-testid="stAppViewContainer"] {
-    background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 50%, #111 100%);
-    color: #f0f0f0;
+:root {
+    --font-primary: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --color-primary: #8B6F4E;
+    --color-primary-hover: #7A6245;
+    --color-text: #2B2B2B;
+    --color-text-secondary: #212529;
+    --color-white: #FFFFFF;
+    --color-background: #FAF9F8;
+    --color-border-focus: #8B572A;
+    --card-bg: #FFFFFF;
+    --card-shadow: 0px 1px 5px #AAAAAA;
+    --card-radius: 20px;
+    --button-radius: 0px;
 }
-[data-testid="stHeader"] { background: transparent; }
+
+html, body, [class*="css"], [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+    background-color: #FAF9F8 !important;
+    color: #2B2B2B !important;
+    font-size: 16px !important;
+    line-height: 1.5 !important;
+    font-weight: normal !important;
+}
+
+[data-testid="stHeader"] {
+    background: transparent !important;
+}
+
+.main .block-container {
+    padding-top: 2rem !important;
+    padding-bottom: 2rem !important;
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+    max-width: 1100px !important;
+}
+
+/* ── Typography & Headings ─────────────────────────────────── */
+h1, h2, h3, h4, h5, h6 {
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+    color: #2B2B2B !important;
+    font-weight: 700 !important;
+}
+
+/* ── Hero Banner ───────────────────────────────────────────── */
 .hero-banner {
-    background: linear-gradient(135deg, #F96302 0%, #cc4f00 60%, #1a1a1a 100%);
-    border-radius: 16px; padding: 2.5rem 2.5rem 2rem; margin-bottom: 2rem;
+    background: #FFFFFF;
+    border: 1px solid #FFFFFF;
+    border-radius: 20px;
+    box-shadow: 0px 1px 5px #AAAAAA;
+    padding: 2.2rem 2.4rem 2rem;
+    margin-bottom: 1.8rem;
 }
-.hero-title { font-size: 2.6rem; font-weight: 800; color: #fff; margin: 0 0 0.4rem 0; line-height: 1.1; }
-.hero-sub   { font-size: 1.05rem; color: rgba(255,255,255,0.78); margin: 0; }
+.hero-title {
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 2.2rem;
+    font-weight: 700;
+    color: #8B6F4E;
+    margin: 0 0 0.4rem 0;
+    line-height: 1.2;
+}
+.hero-sub {
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 1rem;
+    color: #2B2B2B;
+    margin: 0;
+    line-height: 1.5;
+}
+
+/* ── Cards / Panels ────────────────────────────────────────── */
 .info-card {
-    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 12px; padding: 1.1rem 1.4rem; margin-bottom: 1.2rem;
-    font-size: 0.9rem; color: #aaa; line-height: 1.7;
+    background: #FFFFFF;
+    border: 1px solid #FFFFFF;
+    border-radius: 20px;
+    box-shadow: 0px 1px 5px #AAAAAA;
+    padding: 1.4rem 1.8rem;
+    margin-bottom: 1.8rem;
+    font-size: 0.95rem;
+    color: #2B2B2B;
+    line-height: 1.6;
 }
-.info-card code { background: rgba(249,99,2,0.18); color: #F96302; border-radius: 4px; padding: 1px 6px; }
+.info-card strong {
+    color: #8B6F4E;
+    font-weight: 600;
+}
+.info-card code {
+    background: #FAF9F8;
+    color: #8B572A;
+    border: 1px solid #EAE8E4;
+    border-radius: 4px;
+    padding: 2px 7px;
+    font-size: 0.88em;
+}
+
+/* ── Stat Cards ────────────────────────────────────────────── */
 .stat-card {
-    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 12px; padding: 1.2rem 1.5rem; border-left: 4px solid #F96302; text-align: center;
+    background: #FFFFFF;
+    border: 1px solid #FFFFFF;
+    border-radius: 20px;
+    box-shadow: 0px 1px 5px #AAAAAA;
+    padding: 1.4rem 1.6rem;
+    text-align: center;
+    border-top: 4px solid #8B6F4E;
 }
-.stat-value { font-size: 2.2rem; font-weight: 800; color: #F96302; line-height: 1; }
-.stat-label { font-size: 0.8rem; color: #888; margin-top: 0.4rem; }
+.stat-value {
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 2.3rem;
+    font-weight: 700;
+    color: #8B6F4E;
+    line-height: 1.1;
+}
+.stat-label {
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #212529;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 0.5rem;
+}
+
+/* ── Section Headers ───────────────────────────────────────── */
 .section-hdr {
-    font-size: 1.05rem; font-weight: 700; color: #f0f0f0;
-    border-bottom: 2px solid #F96302; padding-bottom: 0.45rem; margin: 1.8rem 0 1rem;
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #8B6F4E;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 2px solid #8B6F4E;
+    padding-bottom: 0.4rem;
+    margin: 1.8rem 0 1.1rem;
 }
+
+/* ── File Uploader ─────────────────────────────────────────── */
 [data-testid="stFileUploader"] section {
-    border: 2px dashed #F96302 !important; border-radius: 12px !important;
-    background: rgba(249,99,2,0.06) !important;
+    border: dashed 1px #8B572A !important;
+    border-radius: 20px !important;
+    background: #FFFFFF !important;
+    box-shadow: 0px 1px 5px #AAAAAA !important;
+    padding: 1.6rem !important;
 }
-.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, #F96302, #cc4f00) !important;
-    color: #fff !important; font-weight: 700 !important; border: none !important;
-    border-radius: 10px !important; padding: 0.65rem 2.2rem !important;
-    font-size: 1rem !important; box-shadow: 0 4px 15px rgba(249,99,2,.35) !important;
+[data-testid="stFileUploader"] section:hover {
+    border-color: #8B6F4E !important;
+    background: #FCFBF9 !important;
 }
+[data-testid="stFileUploader"] section button {
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+    background-color: #8B6F4E !important;
+    border: 1px solid #8B6F4E !important;
+    color: #FFFFFF !important;
+    border-radius: 0px !important;
+    text-transform: uppercase !important;
+    font-size: 90% !important;
+    font-weight: 400 !important;
+    padding: .375rem .75rem !important;
+    height: calc(1.5em + .75em + 2px) !important;
+}
+
+/* ── Buttons ───────────────────────────────────────────────── */
+.stButton > button,
+.stButton > button[kind="primary"],
 .stDownloadButton > button {
-    background: linear-gradient(135deg, #28a745, #1e7e34) !important;
-    color: #fff !important; font-weight: 700 !important; border: none !important;
-    border-radius: 10px !important; box-shadow: 0 4px 15px rgba(40,167,69,.3) !important;
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+    background-color: #8B6F4E !important;
+    border: 1px solid #8B6F4E !important;
+    color: #FFFFFF !important;
+    border-radius: 0px !important;
+    text-transform: uppercase !important;
+    font-size: 90% !important;
+    font-weight: 400 !important;
+    padding: .375rem .75rem !important;
+    height: calc(1.5em + .75em + 2px) !important;
+    box-shadow: none !important;
+    transition: background-color 0.15s ease-in-out, border-color 0.15s ease-in-out !important;
+}
+.stButton > button:hover,
+.stButton > button[kind="primary"]:hover,
+.stDownloadButton > button:hover {
+    background-color: #7A6245 !important;
+    border-color: #7A6245 !important;
+    color: #FFFFFF !important;
+}
+
+/* ── Expanders ─────────────────────────────────────────────── */
+[data-testid="stExpander"] {
+    background: #FFFFFF !important;
+    border: 1px solid #FFFFFF !important;
+    border-radius: 20px !important;
+    box-shadow: 0px 1px 5px #AAAAAA !important;
+    overflow: hidden !important;
+    margin-bottom: 1rem !important;
+}
+[data-testid="stExpander"] summary {
+    font-family: ProximaNova, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+    color: #2B2B2B !important;
+    font-weight: 600 !important;
+}
+
+/* ── Dataframes ────────────────────────────────────────────── */
+[data-testid="stDataFrame"] {
+    background: #FFFFFF !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+
+/* ── Alerts & Dividers ─────────────────────────────────────── */
+hr {
+    border-color: #E8E5E0 !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="hero-banner">
-  <div class="hero-title">🏗️ Home Depot Planogram Generator</div>
+  <div class="hero-title">Home Depot Planogram Generator</div>
   <p class="hero-sub">Upload your Excel workbook to automatically generate a complete bay-level planogram layout for every store.</p>
 </div>
 """, unsafe_allow_html=True)
@@ -942,7 +1215,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="section-hdr">📁 Upload Workbook</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-hdr">Upload Workbook</div>', unsafe_allow_html=True)
 uploaded_file = st.file_uploader(
     "Choose your Excel workbook (.xlsx)",
     type=["xlsx", "xls"],
@@ -950,25 +1223,25 @@ uploaded_file = st.file_uploader(
 )
 
 st.markdown("")
-run_clicked = st.button("▶  Generate Planogram", type="primary")
+run_clicked = st.button("Generate Planogram", type="primary")
 
 if run_clicked:
     if uploaded_file is None:
-        st.error("⚠️  Please upload an Excel workbook first.")
+        st.error("Please upload an Excel workbook first.")
         st.stop()
 
     file_bytes = uploaded_file.getvalue()
     logger     = PlanogramLogger()
 
     try:
-        with st.spinner("📂  Loading workbook…"):
+        with st.spinner("Loading workbook…"):
             wb_data = load_workbook_from_bytes(file_bytes, logger)
 
         st.markdown("---")
-        with st.expander("🔍 Column Detection Report — verify before generating", expanded=False):
+        with st.expander("Column Detection Report — verify before generating", expanded=False):
             st.caption(
                 "Shows which actual Excel column header was detected for each logical field. "
-                "⭐ Facing columns are critical — if they show 'CF', the wrong column was detected."
+                "Facing columns are critical — if they show 'CF', the wrong column was detected."
             )
             col_rows = [
                 ("Store List",      "Store ID",            wb_data.cols_sl.get("store", "?")),
@@ -978,19 +1251,19 @@ if run_clicked:
                 ("Stock & Display", "Store ID",            wb_data.cols_sd.get("store",      "?")),
                 ("Stock & Display", "Stock SKU",           wb_data.cols_sd.get("stock_sku",  "?")),
                 ("Stock & Display", "Stock Description",   wb_data.cols_sd.get("stock_desc", "?")),
-                ("Stock & Display", "⭐ Product Name (exact-match)", wb_data.cols_sd.get("stock_name", "?")),
-                ("Stock & Display", "⭐ Stock Facing",     wb_data.cols_sd.get("stock_face", "?")),
+                ("Stock & Display", "Product Name (exact-match)", wb_data.cols_sd.get("stock_name", "?")),
+                ("Stock & Display", "Stock Facing",        wb_data.cols_sd.get("stock_face", "?")),
                 ("Stock & Display", "Display SKU",         wb_data.cols_sd.get("disp_sku",   "?")),
                 ("Stock & Display", "Display Description", wb_data.cols_sd.get("disp_desc",  "?")),
-                ("Stock & Display", "⭐ Display Facing",   wb_data.cols_sd.get("disp_face",  "?")),
+                ("Stock & Display", "Display Facing",      wb_data.cols_sd.get("disp_face",  "?")),
                 ("Stock & Display", "CF",                  wb_data.cols_sd.get("cf",         "?")),
                 ("Special Orders",  "Combined Rank",       wb_data.cols_so.get("combined_rank", "?")),
                 ("Special Orders",  "Category",            wb_data.cols_so.get("category",      "?")),
                 ("Special Orders",  "SKU",                 wb_data.cols_so.get("sku",           "?")),
                 ("Special Orders",  "SKU Description",     wb_data.cols_so.get("sku_desc",      "?")),
-                ("Special Orders",  "⭐ Product Name (exact-match)", wb_data.cols_so.get("name", "?")),
+                ("Special Orders",  "Product Name (exact-match)", wb_data.cols_so.get("name", "?")),
                 ("Special Orders",  "OMSID",               wb_data.cols_so.get("omsid",         "?")),
-                ("Special Orders",  "⭐ CF (Color Flow)",  wb_data.cols_so.get("cf",            "?")),
+                ("Special Orders",  "CF (Color Flow)",     wb_data.cols_so.get("cf",            "?")),
             ]
             st.dataframe(
                 pd.DataFrame(col_rows, columns=["Sheet", "Logical Field", "→ Actual Excel Column Detected"]),
@@ -998,26 +1271,26 @@ if run_clicked:
                 hide_index=True,
             )
 
-        with st.spinner("⚙️  Generating planogram…"):
+        with st.spinner("Generating planogram…"):
             planogram_df, validation_df = generate_planogram(wb_data, logger)
 
-        with st.spinner("💾  Writing Excel output…"):
-            output_bytes = write_output_bytes(file_bytes, planogram_df, validation_df)
+        with st.spinner("Writing Excel output…"):
+            output_bytes = write_output_bytes(file_bytes, planogram_df, validation_df, wb_data)
 
     except ValueError as exc:
-        st.error(f"❌ Data Error: {exc}")
+        st.error(f"Data Error: {exc}")
         st.stop()
     except RuntimeError as exc:
-        st.error(f"❌ File Error: {exc}")
+        st.error(f"File Error: {exc}")
         st.stop()
     except Exception as exc:
-        st.error(f"❌ Unexpected error: {exc}")
+        st.error(f"Unexpected error: {exc}")
         with st.expander("Technical details"):
             st.code(traceback.format_exc())
         st.stop()
 
     st.markdown("---")
-    st.markdown('<div class="section-hdr">✅ Generation Complete</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-hdr">Generation Complete</div>', unsafe_allow_html=True)
 
     n_stores = planogram_df["Store"].nunique() if not planogram_df.empty else 0
     n_rows   = len(planogram_df)
@@ -1037,9 +1310,9 @@ if run_clicked:
             unsafe_allow_html=True,
         )
     with c3:
-        color = "#e74c3c" if n_issues > 0 else "#2ecc71"
+        color = "#8B572A" if n_issues > 0 else "#8B6F4E"
         st.markdown(
-            f'<div class="stat-card" style="border-left-color:{color};">'
+            f'<div class="stat-card" style="border-top-color:{color};">'
             f'<div class="stat-value" style="color:{color};">{n_issues:,}</div>'
             f'<div class="stat-label">Validation issues</div></div>',
             unsafe_allow_html=True,
@@ -1047,26 +1320,26 @@ if run_clicked:
 
     st.markdown("")
     st.download_button(
-        label="📥  Download Planogram_Output.xlsx",
+        label="Download Planogram_Output.xlsx",
         data=output_bytes,
         file_name="Planogram_Output.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
     if n_issues > 0:
-        st.markdown('<div class="section-hdr">⚠️ Validation Issues</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-hdr">Validation Issues</div>', unsafe_allow_html=True)
         with st.expander(f"Show {n_issues} issue(s)", expanded=True):
             st.dataframe(validation_df, use_container_width=True, hide_index=True)
     else:
-        st.success("✅ No validation issues found.")
+        st.success("No validation issues found.")
 
     if not planogram_df.empty:
-        st.markdown('<div class="section-hdr">👁️ Planogram Preview (first 200 rows)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-hdr">Planogram Preview (first 200 rows)</div>', unsafe_allow_html=True)
         with st.expander("Show preview", expanded=False):
             st.dataframe(planogram_df.head(200), use_container_width=True, hide_index=True)
 
 st.markdown("---")
 st.markdown(
-    '<p style="text-align:center;color:#444;font-size:.8rem;">Home Depot Planogram Generator</p>',
+    '<p style="text-align:center;color:#8B6F4E;font-size:0.85rem;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;margin-top:1.5rem;">Home Depot Planogram Generator</p>',
     unsafe_allow_html=True,
 )
