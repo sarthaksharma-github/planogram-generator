@@ -947,13 +947,13 @@ def _write_amt_sheet(
         # Canonical set of SKUs (order-independent set match)
         sku_set = tuple(sorted(set(skus)))
         store_info_list.append({
-            "store": sid,
-            "pog_name": pog_name,
-            "skus": skus,
-            "sku_count": len(skus),
-            "sku_set": sku_set,
-            "group_key": (pog_name, sku_set),
-            "full_flow": ", ".join(skus),
+            "store":        sid,
+            "pog_name":     pog_name,
+            "skus":         skus,
+            "sku_count":    len(skus),
+            "sku_set":      sku_set,
+            "group_key":    (pog_name, sku_set),
+            "full_flow":    ", ".join(skus),
             "preview_flow": ", ".join(skus[:10]) + ("..." if len(skus) > 10 else ""),
         })
 
@@ -962,6 +962,29 @@ def _write_amt_sheet(
     for info in store_info_list:
         clusters[info["group_key"]].append(info)
 
+    # 4. Build versioned Config Group Names
+    #    ─ First group all (pog_name, sku_set) keys by their pog_name
+    #    ─ If only 1 store ever uses a pog_name → keep name as-is (no version suffix)
+    #    ─ If 2+ stores share a pog_name → assign V1, V2 … by descending store count
+    pog_name_to_keys: Dict[str, List[tuple]] = defaultdict(list)
+    for k in clusters:
+        pog_name_to_keys[k[0]].append(k)
+
+    config_group_name_map: Dict[tuple, str] = {}
+    for pog_name, keys_for_pog in pog_name_to_keys.items():
+        total_stores_for_pog = sum(len(clusters[k]) for k in keys_for_pog)
+
+        if total_stores_for_pog == 1:
+            # Unique POG name – no version suffix
+            config_group_name_map[keys_for_pog[0]] = pog_name
+        else:
+            # Multiple stores share this POG name – sort sub-groups by descending count
+            # and assign V1, V2, V3 …
+            keys_sorted = sorted(keys_for_pog, key=lambda k: -len(clusters[k]))
+            for version_num, k in enumerate(keys_sorted, start=1):
+                config_group_name_map[k] = f"{pog_name} - V{version_num}"
+
+    # 5. Split into shared (2+ stores) and unique (1 store) for summary table
     shared_clusters: List[Tuple[tuple, List[Dict[str, Any]]]] = []
     unique_clusters: List[Tuple[tuple, List[Dict[str, Any]]]] = []
     for k, v in clusters.items():
@@ -970,23 +993,14 @@ def _write_amt_sheet(
         else:
             unique_clusters.append((k, v))
 
-    # Sort shared clusters descending by store count
-    shared_clusters.sort(key=lambda x: -len(x[1]))
+    # Sort shared clusters: primary = descending store count, secondary = config group name
+    shared_clusters.sort(key=lambda x: (-len(x[1]), config_group_name_map.get(x[0], "")))
 
-    # Assign Config Group # numbers: 1..S for shared, S+1..N for unique
-    group_num_map: Dict[tuple, int] = {}
-    cur_num = 1
-    for k, v in shared_clusters:
-        group_num_map[k] = cur_num
-        cur_num += 1
-    for k, v in unique_clusters:
-        group_num_map[k] = cur_num
-        cur_num += 1
-
-    total_stores = len(store_info_list)
-    total_unique_configs = len(clusters)
-    shared_configs_count = len(shared_clusters)
-    stores_in_shared_count = sum(len(v) for _, v in shared_clusters)
+    # 6. KPI totals
+    total_stores            = len(store_info_list)
+    total_unique_configs    = len(clusters)
+    shared_configs_count    = len(shared_clusters)
+    stores_in_shared_count  = sum(len(v) for _, v in shared_clusters)
     stores_with_unique_count = sum(len(v) for _, v in unique_clusters)
 
     # ── Title (Row 1) ──────────────────────────────────────────────────
@@ -994,36 +1008,31 @@ def _write_amt_sheet(
     ws["A1"].font = _TITLE_FONT
     ws.row_dimensions[1].height = 24
 
-    # ── Section 1: KPIs (Rows 3-9) ─────────────────────────────────────
+    # ── Section 1: KPIs (Rows 3–9) ─────────────────────────────────────
     ws["A3"] = "Key Performance Indicators (KPIs)"
     ws["A3"].font = _SECTION_FONT
 
     kpi_headers = ["Metric", "Value"]
     for c_idx, h in enumerate(kpi_headers, start=1):
         cell = ws.cell(row=4, column=c_idx, value=h)
-        cell.font = _WHITE_FONT_BOLD
-        cell.fill = _NAVY_FILL
+        cell.font      = _WHITE_FONT_BOLD
+        cell.fill      = _NAVY_FILL
         cell.alignment = _ALIGN_LEFT if c_idx == 1 else _ALIGN_RIGHT
-        cell.border = _CELL_BORDER
+        cell.border    = _CELL_BORDER
     ws.row_dimensions[4].height = 20
 
     kpis = [
-        ("Total Stores Analyzed", total_stores),
-        ("Total Unique Flow Configurations", total_unique_configs),
-        ("Configurations Shared by 2+ Stores", shared_configs_count),
-        ("Stores in Shared Flow Configurations", stores_in_shared_count),
-        ("Stores with Unique Configurations", stores_with_unique_count),
+        ("Total Stores Analyzed",                    total_stores),
+        ("Total Unique Flow Configurations",          total_unique_configs),
+        ("Configurations Shared by 2+ Stores",       shared_configs_count),
+        ("Stores in Shared Flow Configurations",     stores_in_shared_count),
+        ("Stores with Unique Configurations",        stores_with_unique_count),
     ]
-
     for r_offset, (label, val) in enumerate(kpis, start=5):
         cA = ws.cell(row=r_offset, column=1, value=label)
         cB = ws.cell(row=r_offset, column=2, value=val)
-        cA.font = _KPI_LABEL_FONT
-        cA.alignment = _ALIGN_LEFT
-        cA.border = _CELL_BORDER
-        cB.font = _KPI_VAL_FONT
-        cB.alignment = _ALIGN_RIGHT
-        cB.border = _CELL_BORDER
+        cA.font = _KPI_LABEL_FONT;  cA.alignment = _ALIGN_LEFT;  cA.border = _CELL_BORDER
+        cB.font = _KPI_VAL_FONT;    cB.alignment = _ALIGN_RIGHT; cB.border = _CELL_BORDER
         ws.row_dimensions[r_offset].height = 19
 
     # ── Section 2: Shared Configurations (Rows 12+) ────────────────────
@@ -1031,8 +1040,7 @@ def _write_amt_sheet(
     ws["A12"].font = _SECTION_FONT
 
     sum_headers = [
-        "Config Group #",
-        "POG Name",
+        "Config Group Name",                    # e.g. "10 Bay - Reflow Stores (...) - V1"
         "# Stores with Identical Flow",
         "Matching Store Numbers",
         "# Stock SKUs in Flow",
@@ -1040,30 +1048,29 @@ def _write_amt_sheet(
     ]
     for c_idx, h in enumerate(sum_headers, start=1):
         cell = ws.cell(row=13, column=c_idx, value=h)
-        cell.font = _WHITE_FONT_BOLD
-        cell.fill = _NAVY_FILL
-        cell.alignment = _ALIGN_CENTER if c_idx in (1, 3, 5) else _ALIGN_LEFT
-        cell.border = _CELL_BORDER
+        cell.font      = _WHITE_FONT_BOLD
+        cell.fill      = _NAVY_FILL
+        cell.alignment = _ALIGN_CENTER if c_idx in (2, 4) else _ALIGN_LEFT
+        cell.border    = _CELL_BORDER
     ws.row_dimensions[13].height = 24
 
     cur_row = 14
     for k, v in shared_clusters:
-        grp_num = group_num_map[k]
-        pog_name = v[0]["pog_name"]
+        cfg_name    = config_group_name_map[k]
         store_count = len(v)
-        store_nums = ", ".join(s["store"] for s in v)
-        sku_count = v[0]["sku_count"]
-        preview = v[0]["preview_flow"]
+        store_nums  = ", ".join(s["store"] for s in v)
+        sku_count   = v[0]["sku_count"]
+        preview     = v[0]["preview_flow"]
 
-        row_vals = [grp_num, pog_name, store_count, store_nums, sku_count, preview]
+        row_vals = [cfg_name, store_count, store_nums, sku_count, preview]
         for c_idx, val in enumerate(row_vals, start=1):
-            cell = ws.cell(row=cur_row, column=c_idx, value=val)
-            cell.font = _DATA_FONT_BOLD if c_idx in (1, 3) else _DATA_FONT
-            cell.border = _CELL_BORDER
-            if c_idx == 3:
-                cell.fill = _LIGHT_GREEN_FILL
+            cell           = ws.cell(row=cur_row, column=c_idx, value=val)
+            cell.font      = _DATA_FONT_BOLD if c_idx == 2 else _DATA_FONT
+            cell.border    = _CELL_BORDER
+            if c_idx == 2:          # "# Stores" highlighted green, centred
+                cell.fill      = _LIGHT_GREEN_FILL
                 cell.alignment = _ALIGN_CENTER
-            elif c_idx in (1, 5):
+            elif c_idx == 4:        # "# SKUs" centred
                 cell.alignment = _ALIGN_CENTER
             else:
                 cell.alignment = _ALIGN_LEFT
@@ -1075,8 +1082,7 @@ def _write_amt_sheet(
 
     # ── Section 3: Store-by-Store Detail Table ─────────────────────────
     ws.cell(
-        row=cur_row,
-        column=1,
+        row=cur_row, column=1,
         value=f"Store-by-Store Flow Matching Detail (All {total_stores} Stores)",
     ).font = _SECTION_FONT
     cur_row += 1
@@ -1085,57 +1091,54 @@ def _write_amt_sheet(
         "Store",
         "POG Name",
         "# Stock SKUs",
-        "Config Group #",
+        "Config Group Name",                    # versioned e.g. "… - V1"
         "# Stores with Identical Flow",
         "Matching Stores List",
         "Exact Stock SKU Flow (Full Ordered Sequence)",
     ]
     hdr_row = cur_row
     for c_idx, h in enumerate(detail_headers, start=1):
-        cell = ws.cell(row=hdr_row, column=c_idx, value=h)
-        cell.font = _WHITE_FONT_BOLD
-        cell.fill = _NAVY_FILL
-        cell.alignment = _ALIGN_CENTER if c_idx in (1, 3, 4, 5) else _ALIGN_LEFT
-        cell.border = _CELL_BORDER
+        cell           = ws.cell(row=hdr_row, column=c_idx, value=h)
+        cell.font      = _WHITE_FONT_BOLD
+        cell.fill      = _NAVY_FILL
+        cell.alignment = _ALIGN_CENTER if c_idx in (1, 3, 5) else _ALIGN_LEFT
+        cell.border    = _CELL_BORDER
     ws.row_dimensions[hdr_row].height = 24
     cur_row += 1
 
     for info in store_info_list:
-        k = info["group_key"]
-        grp_num = group_num_map[k]
-        matching_cluster = clusters[k]
-        matching_count = len(matching_cluster)
+        k                   = info["group_key"]
+        cfg_name            = config_group_name_map[k]
+        matching_cluster    = clusters[k]
+        matching_count      = len(matching_cluster)
         matching_stores_str = ", ".join(s["store"] for s in matching_cluster)
 
         row_vals = [
             info["store"],
             info["pog_name"],
             info["sku_count"],
-            grp_num,
+            cfg_name,
             matching_count,
             matching_stores_str,
             info["full_flow"],
         ]
         for c_idx, val in enumerate(row_vals, start=1):
-            cell = ws.cell(row=cur_row, column=c_idx, value=val)
-            cell.font = _DATA_FONT
-            cell.border = _CELL_BORDER
-            if c_idx in (1, 3, 4, 5):
-                cell.alignment = _ALIGN_CENTER
-            else:
-                cell.alignment = _ALIGN_LEFT
+            cell           = ws.cell(row=cur_row, column=c_idx, value=val)
+            cell.font      = _DATA_FONT
+            cell.border    = _CELL_BORDER
+            cell.alignment = _ALIGN_CENTER if c_idx in (1, 3, 5) else _ALIGN_LEFT
         ws.row_dimensions[cur_row].height = 19
         cur_row += 1
 
-    # Auto column widths
-    _auto_width(ws, max_width=80)
-    ws.column_dimensions["A"].width = 16
-    ws.column_dimensions["B"].width = 44
-    ws.column_dimensions["C"].width = 28
-    ws.column_dimensions["D"].width = 26
-    ws.column_dimensions["E"].width = 26
-    ws.column_dimensions["F"].width = 40
-    ws.column_dimensions["G"].width = 75
+    # ── Column widths ──────────────────────────────────────────────────
+    ws.column_dimensions["A"].width = 14   # Store
+    ws.column_dimensions["B"].width = 48   # POG Name / Config Group Name
+    ws.column_dimensions["C"].width = 18   # # Stock SKUs / # Stores
+    ws.column_dimensions["D"].width = 55   # Config Group Name / Matching Stores
+    ws.column_dimensions["E"].width = 26   # # Stores / Matching Stores
+    ws.column_dimensions["F"].width = 50   # Matching Stores / SKU Preview
+    ws.column_dimensions["G"].width = 80   # Full SKU flow
+
 
 
 def write_output_bytes(
