@@ -838,6 +838,71 @@ def _make_pog_name(pog_raw: str, lft_raw: str) -> str:
     return f"{len(all_bays)} Bay - Reflow Stores ({','.join(all_bays)})"
 
 
+# Canonical display order for bay sizes inside Final Set Name.
+# Lower number = shown first in the compact label.
+_FINAL_SIZE_ORDER: Dict[str, int] = {"99": 0, "99C": 1, "87/75": 2, "51": 3}
+
+
+def _normalize_bay_size(raw: str) -> str:
+    """Normalise a raw bay-size token: strip whitespace, upper-case, merge 87 and 75."""
+    s = raw.strip().upper()
+    if s in ("87", "75"):
+        return "87/75"
+    return s
+
+
+def _make_final_set_name(pog_name: str) -> str:
+    """Compact a POG Name into its Final Set Name.
+
+    Examples
+    --------
+    "10 Bay - Reflow Stores (99,99,99,99,99,99,99,99,99,99)"
+        → "10 Bay - Reflow Stores(99 - 10)"
+
+    "10 Bay - Reflow Stores (99,99,99,99,99,99,99,99,51,51)"
+        → "10 Bay - Reflow Stores(99 - 8, 51 - 2)"
+
+    "10 Bay - Reflow Stores (99,99,99,99,75,99,99,99,99,99)"
+        → "10 Bay - Reflow Stores(99 - 9, 87/75 - 1)"
+
+    Rules
+    -----
+    • 87 and 75 are merged into the single label "87/75".
+    • Sizes are COUNTED across the whole bay list (position-independent).
+    • Output order: 99 → 99C → 87/75 → 51 → anything else (alphabetical).
+    • If the pog_name cannot be parsed, it is returned unchanged.
+    """
+    if not pog_name:
+        return pog_name
+
+    # ── Extract bay count from the prefix ─────────────────────────────
+    bay_count_m = re.match(r"^\s*(\d+)\s+Bay", pog_name, re.IGNORECASE)
+    # ── Extract the comma-separated list inside the last parentheses ───
+    paren_m = re.search(r"\(([^)]+)\)\s*$", pog_name)
+    if not bay_count_m or not paren_m:
+        return pog_name  # can't parse → leave as-is
+
+    bay_count = int(bay_count_m.group(1))
+    raw_sizes  = [s.strip() for s in paren_m.group(1).split(",") if s.strip()]
+    if not raw_sizes:
+        return pog_name
+
+    # Normalise and count
+    counts: Dict[str, int] = {}
+    for rs in raw_sizes:
+        label = _normalize_bay_size(rs)
+        counts[label] = counts.get(label, 0) + 1
+
+    # Sort by canonical order, then alphabetically for unknowns
+    sorted_labels = sorted(
+        counts.keys(),
+        key=lambda s: (_FINAL_SIZE_ORDER.get(s, 99), s),
+    )
+
+    parts = ", ".join(f"{label} - {counts[label]}" for label in sorted_labels)
+    return f"{bay_count} Bay - Reflow Stores({parts})"
+
+
 def build_store_list_with_pog_name(wb_data: "WorkbookData") -> pd.DataFrame:
     """Return a copy of the Store List sheet with 'POG Name' inserted as Column B."""
     df = wb_data.store_list.copy()
@@ -851,9 +916,13 @@ def build_store_list_with_pog_name(wb_data: "WorkbookData") -> pd.DataFrame:
         lft_raw = _str(row[lft_col]) if lft_col and lft_col in df.columns else ""
         pog_names.append(_make_pog_name(pog_raw, lft_raw))
 
-    # Insert right after Store (column index 1)
+    # Compact form: "10 Bay - Reflow Stores(99 - 9, 87/75 - 1)" etc.
+    final_set_names: List[str] = [_make_final_set_name(p) for p in pog_names]
+
+    # Insert right after Store (column index 1): POG Name at B, Final Set Name at C
     insert_pos = 1 if len(df.columns) > 1 else len(df.columns)
-    df.insert(insert_pos, "POG Name", pog_names)
+    df.insert(insert_pos,     "POG Name",       pog_names)
+    df.insert(insert_pos + 1, "Final Set Name", final_set_names)
     return df
 
 
@@ -942,47 +1011,50 @@ def _write_amt_sheet(
         sid = _clean_store_id(row[store_col]) if store_col and store_col in row else ""
         if not sid:
             continue
-        pog_name = _str(row.get("POG Name", ""))
-        skus = stock_sku_seq.get(sid, [])
+        pog_name       = _str(row.get("POG Name",       ""))
+        final_set_name = _str(row.get("Final Set Name", "")) or _make_final_set_name(pog_name)
+        skus           = stock_sku_seq.get(sid, [])
         # Canonical set of SKUs (order-independent set match)
         sku_set = tuple(sorted(set(skus)))
         store_info_list.append({
-            "store":        sid,
-            "pog_name":     pog_name,
-            "skus":         skus,
-            "sku_count":    len(skus),
-            "sku_set":      sku_set,
-            "group_key":    (pog_name, sku_set),
-            "full_flow":    ", ".join(skus),
-            "preview_flow": ", ".join(skus[:10]) + ("..." if len(skus) > 10 else ""),
+            "store":          sid,
+            "pog_name":       pog_name,
+            "final_set_name": final_set_name,
+            "skus":           skus,
+            "sku_count":      len(skus),
+            "sku_set":        sku_set,
+            # Group key uses Final Set Name so that 10-Bay-All-99 with same SKUs always
+            # cluster together regardless of individual bay-size permutations.
+            "group_key":      (final_set_name, sku_set),
+            "full_flow":      ", ".join(skus),
+            "preview_flow":   ", ".join(skus[:10]) + ("..." if len(skus) > 10 else ""),
         })
 
-    # 3. Group by (pog_name, sku_set)
+    # 3. Group by (final_set_name, sku_set)
     clusters: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
     for info in store_info_list:
         clusters[info["group_key"]].append(info)
 
-    # 4. Build versioned Config Group Names
-    #    ─ First group all (pog_name, sku_set) keys by their pog_name
-    #    ─ If only 1 store ever uses a pog_name → keep name as-is (no version suffix)
-    #    ─ If 2+ stores share a pog_name → assign V1, V2 … by descending store count
-    pog_name_to_keys: Dict[str, List[tuple]] = defaultdict(list)
+    # 4. Build versioned Config Group Names based on Final Set Name
+    #    ─ Group all cluster keys by their final_set_name
+    #    ─ If only 1 store total uses that final_set_name → keep it as-is (no suffix)
+    #    ─ If 2+ stores share the same final_set_name → assign V1, V2 … by store count
+    fsn_to_keys: Dict[str, List[tuple]] = defaultdict(list)
     for k in clusters:
-        pog_name_to_keys[k[0]].append(k)
+        fsn_to_keys[k[0]].append(k)  # k[0] is final_set_name
 
     config_group_name_map: Dict[tuple, str] = {}
-    for pog_name, keys_for_pog in pog_name_to_keys.items():
-        total_stores_for_pog = sum(len(clusters[k]) for k in keys_for_pog)
+    for fsn, keys_for_fsn in fsn_to_keys.items():
+        total_stores_for_fsn = sum(len(clusters[k]) for k in keys_for_fsn)
 
-        if total_stores_for_pog == 1:
-            # Unique POG name – no version suffix
-            config_group_name_map[keys_for_pog[0]] = pog_name
+        if total_stores_for_fsn == 1:
+            # Only 1 store has this Final Set Name – no version suffix
+            config_group_name_map[keys_for_fsn[0]] = fsn
         else:
-            # Multiple stores share this POG name – sort sub-groups by descending count
-            # and assign V1, V2, V3 …
-            keys_sorted = sorted(keys_for_pog, key=lambda k: -len(clusters[k]))
+            # Sort sub-groups by descending store count; largest → V1
+            keys_sorted = sorted(keys_for_fsn, key=lambda k: -len(clusters[k]))
             for version_num, k in enumerate(keys_sorted, start=1):
-                config_group_name_map[k] = f"{pog_name} - V{version_num}"
+                config_group_name_map[k] = f"{fsn} - V{version_num}"
 
     # 5. Split into shared (2+ stores) and unique (1 store) for summary table
     shared_clusters: List[Tuple[tuple, List[Dict[str, Any]]]] = []
@@ -997,11 +1069,12 @@ def _write_amt_sheet(
     shared_clusters.sort(key=lambda x: (-len(x[1]), config_group_name_map.get(x[0], "")))
 
     # 6. KPI totals
-    total_stores            = len(store_info_list)
-    total_unique_configs    = len(clusters)
-    shared_configs_count    = len(shared_clusters)
-    stores_in_shared_count  = sum(len(v) for _, v in shared_clusters)
+    total_stores             = len(store_info_list)
+    total_unique_configs     = len(clusters)
+    shared_configs_count     = len(shared_clusters)
+    stores_in_shared_count   = sum(len(v) for _, v in shared_clusters)
     stores_with_unique_count = sum(len(v) for _, v in unique_clusters)
+
 
     # ── Title (Row 1) ──────────────────────────────────────────────────
     ws["A1"] = "AMT - Identical POG Layout & Stock SKU Flow Analysis"
@@ -1090,6 +1163,7 @@ def _write_amt_sheet(
     detail_headers = [
         "Store",
         "POG Name",
+        "Final Set Name",
         "# Stock SKUs",
         "Config Group Name",                    # versioned e.g. "… - V1"
         "# Stores with Identical Flow",
@@ -1101,7 +1175,7 @@ def _write_amt_sheet(
         cell           = ws.cell(row=hdr_row, column=c_idx, value=h)
         cell.font      = _WHITE_FONT_BOLD
         cell.fill      = _NAVY_FILL
-        cell.alignment = _ALIGN_CENTER if c_idx in (1, 3, 5) else _ALIGN_LEFT
+        cell.alignment = _ALIGN_CENTER if c_idx in (1, 4, 6) else _ALIGN_LEFT
         cell.border    = _CELL_BORDER
     ws.row_dimensions[hdr_row].height = 24
     cur_row += 1
@@ -1116,6 +1190,7 @@ def _write_amt_sheet(
         row_vals = [
             info["store"],
             info["pog_name"],
+            info["final_set_name"],
             info["sku_count"],
             cfg_name,
             matching_count,
@@ -1126,18 +1201,19 @@ def _write_amt_sheet(
             cell           = ws.cell(row=cur_row, column=c_idx, value=val)
             cell.font      = _DATA_FONT
             cell.border    = _CELL_BORDER
-            cell.alignment = _ALIGN_CENTER if c_idx in (1, 3, 5) else _ALIGN_LEFT
+            cell.alignment = _ALIGN_CENTER if c_idx in (1, 4, 6) else _ALIGN_LEFT
         ws.row_dimensions[cur_row].height = 19
         cur_row += 1
 
     # ── Column widths ──────────────────────────────────────────────────
-    ws.column_dimensions["A"].width = 14   # Store
-    ws.column_dimensions["B"].width = 48   # POG Name / Config Group Name
-    ws.column_dimensions["C"].width = 18   # # Stock SKUs / # Stores
-    ws.column_dimensions["D"].width = 55   # Config Group Name / Matching Stores
-    ws.column_dimensions["E"].width = 26   # # Stores / Matching Stores
-    ws.column_dimensions["F"].width = 50   # Matching Stores / SKU Preview
-    ws.column_dimensions["G"].width = 80   # Full SKU flow
+    ws.column_dimensions["A"].width = 12   # Store
+    ws.column_dimensions["B"].width = 50   # POG Name  (full, e.g. "10 Bay - Reflow Stores (99,99,...)")
+    ws.column_dimensions["C"].width = 38   # Final Set Name  (compact, e.g. "10 Bay - Reflow Stores(99 - 9, 87/75 - 1)")
+    ws.column_dimensions["D"].width = 16   # # Stock SKUs
+    ws.column_dimensions["E"].width = 48   # Config Group Name
+    ws.column_dimensions["F"].width = 24   # # Stores with Identical Flow
+    ws.column_dimensions["G"].width = 50   # Matching Stores List
+    ws.column_dimensions["H"].width = 80   # Full SKU flow
 
 
 
