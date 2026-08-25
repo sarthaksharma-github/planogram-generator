@@ -1326,43 +1326,78 @@ def write_output_bytes(
 # SECTION 10 — STORE SKU GENERATOR
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Known non-store header names in the SKU sheet (case-insensitive).
-# Any column header that matches one of these is skipped when looking for
-# store-number columns.
-_SKU_SHEET_NON_STORE_COLS = frozenset([
+# Known non-board-set header names in the SKU sheet (case-insensitive).
+# Columns whose headers match any of these are skipped when scanning for
+# SO Board Set columns.
+_SKU_SHEET_NON_BOARDSET_COLS = frozenset([
     "sku count", "sku", "description", "rank", "cf id", "cfid", "cf",
     "name", "product name",
 ])
 
 
 def generate_store_sku_sheet(file_bytes: bytes) -> bytes:
-    """Read a SKU-vs-Store matrix workbook and add a 'Store SKU' sheet.
+    """Read a SKU-vs-SO-Board-Set matrix workbook and add a 'Store SKU' sheet.
 
     Input workbook must have:
       • Sheet 'SKU'   — col A: SKU number, col B: Description, col C: Rank,
-                         col D: CF ID, col E+: store columns (header = store
-                         number; cell = 'Y' when that store carries the SKU).
-      • Sheet 'Store' — col A: Store, col B: SO Board Set  (informational only,
-                         not currently used in the output).
+                         col D: CF ID, col E+: SO Board Set columns (header =
+                         board set name, e.g. '1 Bay South'; cell = 'Y' when
+                         that board set carries the SKU).
+      • Sheet 'Store' — col A: Store number, col B: SO Board Set name.
+                         Used to expand board-set names into individual stores.
 
-    Output: same workbook bytes with a new 'Store SKU' sheet appended.
+    Logic:
+      For each SKU row, for each Y-marked board-set column, find all stores
+      in the Store sheet whose SO Board Set matches that column name, and emit
+      one output row per store.
+
+    Output columns: Store | SKU | Description | Store-SKU | Facings | SKU - Facing
+    Sorted by Store (numeric) then SKU.
     """
     try:
         xl = pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl")
     except Exception as exc:
         raise RuntimeError(f"Cannot open workbook: {exc}") from exc
 
-    # ── Locate the SKU sheet (case-insensitive) ───────────────────────────────
-    sku_sheet_name = None
-    for name in xl.sheet_names:
-        if name.strip().lower() == "sku":
-            sku_sheet_name = name
-            break
-    if sku_sheet_name is None:
+    # ── Helper: find sheet case-insensitively ─────────────────────────────────
+    def _find_sheet(desired: str) -> str:
+        for name in xl.sheet_names:
+            if name.strip().lower() == desired.strip().lower():
+                return name
         raise ValueError(
-            f"Sheet 'SKU' not found. Available sheets: {xl.sheet_names}"
+            f"Sheet '{desired}' not found. Available sheets: {xl.sheet_names}"
         )
 
+    # ── Load Store sheet → build SO Board Set → [store numbers] mapping ───────
+    store_sheet_name = _find_sheet("Store")
+    df_store = xl.parse(store_sheet_name, dtype=str)
+    df_store.columns = [str(c).strip() for c in df_store.columns]
+    df_store.dropna(how="all", inplace=True)
+    df_store.reset_index(drop=True, inplace=True)
+
+    if df_store.empty:
+        raise ValueError("The 'Store' sheet is empty.")
+
+    store_cols_list = list(df_store.columns)
+    store_num_col      = store_cols_list[0]                              # col A: store number
+    board_set_col      = store_cols_list[1] if len(store_cols_list) > 1 else None  # col B: SO Board Set
+
+    if board_set_col is None:
+        raise ValueError("The 'Store' sheet must have at least 2 columns: Store and SO Board Set.")
+
+    # board_set_to_stores: SO Board Set name (normalized) → list of store numbers
+    board_set_to_stores: Dict[str, List[str]] = defaultdict(list)
+    for _, row in df_store.iterrows():
+        store_num  = _clean_store_id(row[store_num_col])
+        board_set  = _str(row[board_set_col])
+        if store_num and board_set:
+            board_set_to_stores[board_set.strip()].append(store_num)
+
+    if not board_set_to_stores:
+        raise ValueError("No valid Store→SO Board Set mappings found in the 'Store' sheet.")
+
+    # ── Load SKU sheet ─────────────────────────────────────────────────────────
+    sku_sheet_name = _find_sheet("SKU")
     df_sku = xl.parse(sku_sheet_name, dtype=str)
     df_sku.columns = [str(c).strip() for c in df_sku.columns]
     df_sku.dropna(how="all", inplace=True)
@@ -1371,25 +1406,20 @@ def generate_store_sku_sheet(file_bytes: bytes) -> bytes:
     if df_sku.empty:
         raise ValueError("The 'SKU' sheet is empty.")
 
-    cols = list(df_sku.columns)
+    sku_cols = list(df_sku.columns)
+    sku_col  = sku_cols[0]                                       # col A: SKU number
+    desc_col = sku_cols[1] if len(sku_cols) > 1 else None        # col B: Description
 
-    # ── Identify the SKU and Description columns ──────────────────────────────
-    # SKU is the first column; Description is the second column.
-    sku_col  = cols[0]
-    desc_col = cols[1] if len(cols) > 1 else None
+    # Board-set columns: anything from col C onward not in the known-skip list
+    boardset_cols: List[str] = [
+        col for col in sku_cols[2:]
+        if col.strip().lower() not in _SKU_SHEET_NON_BOARDSET_COLS
+    ]
 
-    # ── Identify store columns ────────────────────────────────────────────────
-    # A column is treated as a "store column" if its header is NOT one of the
-    # known non-store column names AND it is not the sku_col or desc_col.
-    store_cols: List[str] = []
-    for col in cols[2:]:          # skip SKU + Description at minimum
-        if col.strip().lower() not in _SKU_SHEET_NON_STORE_COLS:
-            store_cols.append(col)
-
-    if not store_cols:
+    if not boardset_cols:
         raise ValueError(
-            "No store columns detected in the 'SKU' sheet. "
-            "Expected column headers that are store numbers (e.g. 106, 207, ...)."
+            "No SO Board Set columns detected in the 'SKU' sheet. "
+            "Expected column headers like '1 Bay South', '2 Bay NE', etc."
         )
 
     # ── Build output rows ─────────────────────────────────────────────────────
@@ -1401,51 +1431,52 @@ def generate_store_sku_sheet(file_bytes: bytes) -> bytes:
         if not sku:
             continue
 
-        for store_col in store_cols:
-            cell_val = _str(row.get(store_col, ""))
-            if cell_val.strip().upper() == "Y":
-                store = _clean_store_id(store_col)
+        for bs_col in boardset_cols:
+            cell_val = _str(row.get(bs_col, ""))
+            if cell_val.strip().upper() != "Y":
+                continue
+
+            # Look up all stores that belong to this SO Board Set
+            stores_for_bs = board_set_to_stores.get(bs_col.strip(), [])
+            for store in stores_for_bs:
                 output_rows.append({
-                    "Store":       store,
-                    "SKU":         sku,
-                    "_empty":      "",           # Column C intentionally blank
-                    "Description": desc,
-                    "Store-SKU":   f"{sku}-{store}",
-                    "Facings":     1,
-                    "SKU - Facing": f"{sku}-1",
+                    "Store":         store,
+                    "SKU":           sku,
+                    "Description":   desc,
+                    "Store-SKU":     f"{sku}-{store}",
+                    "Facings":       1,
+                    "SKU - Facing":  f"{sku}-1",
                 })
 
     if not output_rows:
         raise ValueError(
-            "No Y-marked (Store, SKU) combinations found in the 'SKU' sheet."
+            "No output rows generated. Check that:\n"
+            "• The 'SKU' sheet has Y-marked cells in the board-set columns.\n"
+            "• The board-set column names in the 'SKU' sheet exactly match the "
+            "SO Board Set values in the 'Store' sheet."
         )
 
-    # Sort by SKU then Store (numeric store sort where possible)
+    # Sort by Store (numeric where possible) then SKU — matching expected output
     def _sort_key(r: Dict[str, Any]):
         try:
-            store_int = int(r["Store"])
-            return (r["SKU"], store_int, "")
+            return (int(r["Store"]), r["SKU"])
         except (ValueError, TypeError):
-            return (r["SKU"], 0, r["Store"])
+            return (0, r["SKU"])
 
     output_rows.sort(key=_sort_key)
 
     out_df = pd.DataFrame(output_rows, columns=[
-        "Store", "SKU", "_empty", "Description", "Store-SKU", "Facings", "SKU - Facing",
+        "Store", "SKU", "Description", "Store-SKU", "Facings", "SKU - Facing",
     ])
-    # Rename the blank column to empty string for display
-    out_df.rename(columns={"_empty": ""}, inplace=True)
 
     # ── Write into workbook ───────────────────────────────────────────────────
     wb = _openpyxl_load(BytesIO(file_bytes))
     _write_df_to_sheet(wb, OUTPUT_SHEET_STORE_SKU, out_df, fill=_HD_ORANGE)
 
-    # Move Store SKU sheet to the end (after all existing sheets)
-    # openpyxl sheet order: existing sheets first, then Store SKU last
+    # Move Store SKU sheet to the last position
     sheet_names = [s.title for s in wb._sheets]
     if OUTPUT_SHEET_STORE_SKU in sheet_names:
         idx = sheet_names.index(OUTPUT_SHEET_STORE_SKU)
-        # Move to last position
         wb._sheets.append(wb._sheets.pop(idx))
 
     output_bio = BytesIO()
