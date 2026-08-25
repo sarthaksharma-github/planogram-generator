@@ -107,6 +107,7 @@ OUTPUT_SHEET_PLANOGRAM  = "Generated Planogram"
 OUTPUT_SHEET_VALIDATION = "Validation"
 OUTPUT_SHEET_STORE_POG  = "Store List (POG)"
 OUTPUT_SHEET_AMT        = "AMT"
+OUTPUT_SHEET_STORE_SKU  = "Store SKU"
 
 # Output column order
 PLANOGRAM_COLUMNS: List[str] = [
@@ -407,7 +408,7 @@ def build_display_index(df: pd.DataFrame, cols: Dict[str, str], logger: Planogra
         facing  = max(disp_f, stock_f)
         if not store or not sku:
             continue
-        index[store].append(SKURecord(sku=sku, description=desc, facing=facing, sku_type="Display"))
+        index[store].append(SKURecord(sku=sku, description=desc, facing=facing, sku_type="Stock-DB"))
     return dict(index)
 
 
@@ -1322,7 +1323,139 @@ def write_output_bytes(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 10 — STREAMLIT UI
+# SECTION 10 — STORE SKU GENERATOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Known non-store header names in the SKU sheet (case-insensitive).
+# Any column header that matches one of these is skipped when looking for
+# store-number columns.
+_SKU_SHEET_NON_STORE_COLS = frozenset([
+    "sku count", "sku", "description", "rank", "cf id", "cfid", "cf",
+    "name", "product name",
+])
+
+
+def generate_store_sku_sheet(file_bytes: bytes) -> bytes:
+    """Read a SKU-vs-Store matrix workbook and add a 'Store SKU' sheet.
+
+    Input workbook must have:
+      • Sheet 'SKU'   — col A: SKU number, col B: Description, col C: Rank,
+                         col D: CF ID, col E+: store columns (header = store
+                         number; cell = 'Y' when that store carries the SKU).
+      • Sheet 'Store' — col A: Store, col B: SO Board Set  (informational only,
+                         not currently used in the output).
+
+    Output: same workbook bytes with a new 'Store SKU' sheet appended.
+    """
+    try:
+        xl = pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl")
+    except Exception as exc:
+        raise RuntimeError(f"Cannot open workbook: {exc}") from exc
+
+    # ── Locate the SKU sheet (case-insensitive) ───────────────────────────────
+    sku_sheet_name = None
+    for name in xl.sheet_names:
+        if name.strip().lower() == "sku":
+            sku_sheet_name = name
+            break
+    if sku_sheet_name is None:
+        raise ValueError(
+            f"Sheet 'SKU' not found. Available sheets: {xl.sheet_names}"
+        )
+
+    df_sku = xl.parse(sku_sheet_name, dtype=str)
+    df_sku.columns = [str(c).strip() for c in df_sku.columns]
+    df_sku.dropna(how="all", inplace=True)
+    df_sku.reset_index(drop=True, inplace=True)
+
+    if df_sku.empty:
+        raise ValueError("The 'SKU' sheet is empty.")
+
+    cols = list(df_sku.columns)
+
+    # ── Identify the SKU and Description columns ──────────────────────────────
+    # SKU is the first column; Description is the second column.
+    sku_col  = cols[0]
+    desc_col = cols[1] if len(cols) > 1 else None
+
+    # ── Identify store columns ────────────────────────────────────────────────
+    # A column is treated as a "store column" if its header is NOT one of the
+    # known non-store column names AND it is not the sku_col or desc_col.
+    store_cols: List[str] = []
+    for col in cols[2:]:          # skip SKU + Description at minimum
+        if col.strip().lower() not in _SKU_SHEET_NON_STORE_COLS:
+            store_cols.append(col)
+
+    if not store_cols:
+        raise ValueError(
+            "No store columns detected in the 'SKU' sheet. "
+            "Expected column headers that are store numbers (e.g. 106, 207, ...)."
+        )
+
+    # ── Build output rows ─────────────────────────────────────────────────────
+    output_rows: List[Dict[str, Any]] = []
+
+    for _, row in df_sku.iterrows():
+        sku  = _str(row[sku_col])
+        desc = _str(row[desc_col]) if desc_col else ""
+        if not sku:
+            continue
+
+        for store_col in store_cols:
+            cell_val = _str(row.get(store_col, ""))
+            if cell_val.strip().upper() == "Y":
+                store = _clean_store_id(store_col)
+                output_rows.append({
+                    "Store":       store,
+                    "SKU":         sku,
+                    "_empty":      "",           # Column C intentionally blank
+                    "Description": desc,
+                    "Store-SKU":   f"{sku}-{store}",
+                    "Facings":     1,
+                    "SKU - Facing": f"{sku}-1",
+                })
+
+    if not output_rows:
+        raise ValueError(
+            "No Y-marked (Store, SKU) combinations found in the 'SKU' sheet."
+        )
+
+    # Sort by SKU then Store (numeric store sort where possible)
+    def _sort_key(r: Dict[str, Any]):
+        try:
+            store_int = int(r["Store"])
+            return (r["SKU"], store_int, "")
+        except (ValueError, TypeError):
+            return (r["SKU"], 0, r["Store"])
+
+    output_rows.sort(key=_sort_key)
+
+    out_df = pd.DataFrame(output_rows, columns=[
+        "Store", "SKU", "_empty", "Description", "Store-SKU", "Facings", "SKU - Facing",
+    ])
+    # Rename the blank column to empty string for display
+    out_df.rename(columns={"_empty": ""}, inplace=True)
+
+    # ── Write into workbook ───────────────────────────────────────────────────
+    wb = _openpyxl_load(BytesIO(file_bytes))
+    _write_df_to_sheet(wb, OUTPUT_SHEET_STORE_SKU, out_df, fill=_HD_ORANGE)
+
+    # Move Store SKU sheet to the end (after all existing sheets)
+    # openpyxl sheet order: existing sheets first, then Store SKU last
+    sheet_names = [s.title for s in wb._sheets]
+    if OUTPUT_SHEET_STORE_SKU in sheet_names:
+        idx = sheet_names.index(OUTPUT_SHEET_STORE_SKU)
+        # Move to last position
+        wb._sheets.append(wb._sheets.pop(idx))
+
+    output_bio = BytesIO()
+    wb.save(output_bio)
+    output_bio.seek(0)
+    return output_bio.read()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 11 — STREAMLIT UI
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.markdown("""
@@ -1680,6 +1813,71 @@ if run_clicked:
         st.markdown('<div class="section-hdr">Planogram Preview (first 200 rows)</div>', unsafe_allow_html=True)
         with st.expander("Show preview", expanded=False):
             st.dataframe(planogram_df.head(200), use_container_width=True, hide_index=True)
+
+st.markdown("---")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STORE SKU GENERATOR — standalone tool
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.markdown('<div class="section-hdr">Store SKU Generator</div>', unsafe_allow_html=True)
+
+st.markdown("""
+<div class="info-card">
+  <strong>Required sheets in workbook:</strong><br>
+  &nbsp;&nbsp;• <code>SKU</code> — SKU | Description | Rank | CF ID | [Store columns with Y/blank]<br>
+  &nbsp;&nbsp;• <code>Store</code> — Store | SO Board Set<br><br>
+  <strong>Output:</strong> The same workbook is returned with a new <code>Store SKU</code> sheet added,
+  containing one row for every store-column marked <strong>Y</strong> for each SKU.
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="section-hdr">Upload Workbook</div>', unsafe_allow_html=True)
+sku_uploaded_file = st.file_uploader(
+    "Choose your Store SKU Excel workbook (.xlsx)",
+    type=["xlsx", "xls"],
+    label_visibility="collapsed",
+    key="sku_file_uploader",
+)
+
+st.markdown("")
+sku_run_clicked = st.button("Generate Store SKU", type="primary", key="sku_run_btn")
+
+if sku_run_clicked:
+    if sku_uploaded_file is None:
+        st.error("Please upload an Excel workbook first.")
+        st.stop()
+
+    sku_file_bytes = sku_uploaded_file.getvalue()
+
+    try:
+        with st.spinner("Processing SKU sheet…"):
+            sku_output_bytes = generate_store_sku_sheet(sku_file_bytes)
+
+    except ValueError as exc:
+        st.error(f"Data Error: {exc}")
+        st.stop()
+    except RuntimeError as exc:
+        st.error(f"File Error: {exc}")
+        st.stop()
+    except Exception as exc:
+        st.error(f"Unexpected error: {exc}")
+        with st.expander("Technical details"):
+            st.code(traceback.format_exc())
+        st.stop()
+
+    st.markdown("---")
+    st.markdown('<div class="section-hdr">Generation Complete</div>', unsafe_allow_html=True)
+    st.success("Store SKU sheet generated successfully.")
+
+    st.markdown("")
+    st.download_button(
+        label="Download Store_SKU_Output.xlsx",
+        data=sku_output_bytes,
+        file_name="Store_SKU_Output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="sku_download_btn",
+    )
 
 st.markdown("---")
 st.markdown(
