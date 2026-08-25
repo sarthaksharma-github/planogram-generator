@@ -1433,7 +1433,7 @@ def generate_store_sku_sheet(file_bytes: bytes) -> bytes:
 
         for bs_col in boardset_cols:
             cell_val = _str(row.get(bs_col, ""))
-            if cell_val.strip().upper() != "Y":
+            if not cell_val.strip().upper().startswith("Y"):
                 continue
 
             # Look up all stores that belong to this SO Board Set
