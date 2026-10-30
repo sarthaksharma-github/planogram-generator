@@ -453,61 +453,148 @@ def build_so_global_list(df: pd.DataFrame, cols: Dict[str, str]) -> List[SORecor
 
 
 # ---------------------------------------------------------------------------
-# SO conflict-avoidance helpers
+# SO conflict-avoidance helpers & Master Ship List Crosswalk
 # ---------------------------------------------------------------------------
 
-def _norm_product_name(name: str) -> str:
-    """Normalize a product Name for exact, case-insensitive comparison.
+# Master Explicit Crosswalk from HD Canada Ship List:
+# Maps SO Display Board SKU -> Stock Product SKU
+SO_DISPLAY_TO_STOCK_CROSSWALK: Dict[str, str] = {
+    # 9 Confirmed Overlap Products (1,005 occurrences across 342 stores)
+    "1015911668": "122317",       # DISP_S/O_12X24 MONTAUK BLACK_15.5X48 -> 12X24 MONTAUK BLACK TILE-CA-10SF
+    "1016140182": "1006367442",   # DISP_SO_12X24 ALEXANDRIA MAT_15.5X48 -> 12X24 ALEXANDRA MAT-16SF-CA
+    "1016140203": "1000717257",   # DISP_SO_12X24 VITA ARDESIA_15.5X48 -> 12X24 VITA ELEGNTE ARDESIA-CA-15.6SF
+    "1016140155": "1011641436",   # DISP_SO_24X48 AGUA LINDA_15.5X48 -> 24X48 AGUA LINDA POLISHED-16SF-CA
+    "1016140189": "1001294717",   # DISP_SO_18X18 PORTLAND BEIGE_15.5X48 -> 18X18 PORTLAND ST BEIGE-CA-17.44SF
+    "1016049102": "1006518877",   # DISP_SS/O_12X24 ALPE IVORY_15.5X48 -> 12X24 ALPE IVORY CA-15.50SF
+    "1016049100": "1006383689",   # DISP_S/O_12X24 BIANCO DOLOMI_15.5X48 -> 12X24 BIANCO DOLOMITE POL16 SF CA
+    "1016049094": "1011113646",   # DISP_S/O_12X24 FENBROOK REGA_15.5X48 -> 12X24 FENBROOK REGAL WHITE-15.5SF-CA
+    "1015525810": "1011116428",   # DISP_S/O_24X48 CALACATTA TOP_15.5X48 -> 24X48 WENROSE CALACATTA TOPAZ-15.5SF-CA
+    
+    # 2 High-Confidence "Possible" Overlaps Identified in Audit
+    "1016140172": "1009659495",   # DISP_SO_16X32 YOSEMITE WHITE_15.5X48 -> 16X32 YOSEMITE WHITE POL-14.2SF-CA
+    "1016188685": "1004912032",   # DISP_S/O_10X40 BROOKSDALE BIRC_16X15 -> 10X40 BROOKSDALE BIRCH-13.89SF-CA
+    
+    # Additional Ship List identities
+    "1016140160": "1006930136",   # DISP_SO_16X32 AASHINI BLACK_15.5X48 -> 16X32 AASHINI BLACK
+    "1016140179": "1002922129",   # DISP_SO_24X24 QUARTZO NATUR_15.5X48 -> 24X24 QUARTZO NATURAL
+}
 
-    Collapses repeated whitespace and upper-cases. No fuzzy matching, no
-    keyword extraction — this is a direct string comparison on the clean
-    product Name field (e.g. 'BIANCO DOLOMI'), not the full SKU description.
-    """
+@dataclass
+class StoreConflictContext:
+    """Multi-tier conflict resolution context for a single store."""
+    stock_skus: set[str] = field(default_factory=set)
+    display_skus: set[str] = field(default_factory=set)
+    stock_stems: set[str] = field(default_factory=set)
+    stock_names: set[str] = field(default_factory=set)
+
+
+def _norm_product_name(name: str) -> str:
+    """Normalize a product Name for clean comparison."""
     if not isinstance(name, str) or not name.strip():
         return ""
     return re.sub(r"\s+", " ", name.strip()).upper()
 
 
-def _build_conflict_set(stock_names: List[str]) -> set:
-    """Build the set of normalized stock product Names already in a store.
-
-    An SO item conflicts only if its product Name is an exact (case-
-    insensitive) match to one of these — e.g. stock 'CRYSTAL BIANCO' and SO
-    'BIANCO DOLOMI' are distinct products and do NOT conflict, but stock
-    'BIANCO DOLOMI' and SO 'BIANCO DOLOMI' do.
+def _extract_product_stem(text: str) -> str:
     """
+    Extracts the core product identifier stem from a product name or description
+    by removing standard prefixes (DISP_SO_, DISP_), dimensions (12X24, etc.),
+    packaging suffixes (-16SF-CA, etc.), and common noise words.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    s = text.upper().strip()
+    # Strip DISP prefixes (DISP_SO_, DISP_S/O_, DISP_SS/O_, DISP_)
+    s = re.sub(r"^DISP_[A-Z0-9/]+_", "", s)
+    s = re.sub(r"^DISP_", "", s)
+    # Strip dimensions like 12X24, 24X48, 16.5X15.5, 15.5X48, etc.
+    s = re.sub(r"\b\d+(?:\.\d+)?X\d+(?:\.\d+)?\b", "", s)
+    # Strip trailing dimension suffixes like _15.5X48 or _16X15
+    s = re.sub(r"_\d+(?:\.\d+)?X\d+(?:\.\d+)?.*$", "", s)
+    # Strip packaging and suffixes: -16SF-CA, -CA-10SF, -15.50SF, POL16, etc.
+    s = re.sub(r"-\d+(?:\.\d+)?SF(?:-[A-Z0-9]+)?", "", s)
+    s = re.sub(r"-[A-Z]+-\d+(?:\.\d+)?SF", "", s)
+    s = re.sub(r"-\d+SF", "", s)
+    # Strip common noise tokens
+    s = re.sub(r"\b(TILE|CA|MAT|MATT|MATTE|POL|POLISHED|SF|ST)\b", "", s)
+    # Normalize spelling variations across sheets
+    s = s.replace("ALEXANDRIA", "ALEXANDRA")
+    s = s.replace("ELEGNTE", "ELEGANTE")
+    s = re.sub(r"[^A-Z0-9]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _build_conflict_set(stock_names: List[str]) -> set:
+    """Legacy helper maintained for backward compatibility."""
     return {_norm_product_name(n) for n in stock_names if _norm_product_name(n)}
 
 
-def _is_so_conflict(so_name: str, conflict_entries: set) -> bool:
-    """Return True if so_name exactly matches (case-insensitive) a stock product Name."""
-    norm = _norm_product_name(so_name)
-    if not norm:
-        return False
-    return norm in conflict_entries
+def _is_so_conflict(
+    rec: SORecord | str,
+    conflict_entries: Any,
+) -> bool:
+    """
+    Multi-tier conflict detection:
+    1. Explicit Ship List crosswalk check (SO SKU -> Stock SKU)
+    2. Display board SKU collision (SO SKU already in Display/Stock SKUs)
+    3. Product stem / fuzzy token matching (handles truncations & typos)
+    4. Exact normalized name matching (legacy)
+    """
+    if isinstance(rec, str):
+        # Legacy fallback if called with string name
+        norm = _norm_product_name(rec)
+        if isinstance(conflict_entries, StoreConflictContext):
+            return norm in conflict_entries.stock_names if norm else False
+        return norm in conflict_entries if norm and isinstance(conflict_entries, (set, list)) else False
+
+    so_sku = str(rec.sku).strip()
+
+    # Tier 1: Check Explicit Ship List Crosswalk (authoritative)
+    if so_sku in SO_DISPLAY_TO_STOCK_CROSSWALK:
+        target_stock_sku = SO_DISPLAY_TO_STOCK_CROSSWALK[so_sku]
+        if isinstance(conflict_entries, StoreConflictContext):
+            if target_stock_sku in conflict_entries.stock_skus:
+                return True
+        elif isinstance(conflict_entries, (set, list)):
+            if target_stock_sku in conflict_entries:
+                return True
+
+    if isinstance(conflict_entries, StoreConflictContext):
+        # Tier 2: Display board SKU collision
+        if so_sku in conflict_entries.display_skus or so_sku in conflict_entries.stock_skus:
+            return True
+
+        # Tier 3: Stem & substring matching (handles truncated names like 'BIANCO DOLOMI', 'FENBROOK REGA')
+        so_stem = _extract_product_stem(rec.name or rec.description)
+        if so_stem and len(so_stem) >= 4:
+            for s_stem in conflict_entries.stock_stems:
+                if so_stem == s_stem or (len(so_stem) >= 6 and (so_stem in s_stem or s_stem in so_stem)):
+                    return True
+
+        # Tier 4: Exact normalized Name match
+        so_norm = _norm_product_name(rec.name)
+        if so_norm and so_norm in conflict_entries.stock_names:
+            return True
+
+    elif isinstance(conflict_entries, (set, list)):
+        so_norm = _norm_product_name(rec.name)
+        if so_norm and so_norm in conflict_entries:
+            return True
+
+    return False
 
 
 def select_so_for_store(
     so_global_list: List[SORecord],
-    conflict_entries: set,
+    conflict_entries: Any,
     capacity: int,
     store: Any,
     logger: PlanogramLogger,
 ) -> List[SKURecord]:
-    """Pick SO SKUs for one store from the global ranked list.
-
-    Walk in Combined Rank order. For every position:
-    - Available & no conflict  → take it directly.
-    - Already used as a prior replacement  → this slot's category must still be
-      filled; find the next non-used, non-conflicting item of the SAME category.
-    - Conflict with stock      → same as above; find next of the same category.
-
-    This guarantees the category pattern from the global list (e.g. every 5th
-    position is Wood) is preserved even when replacements cascade forward.
-    """
-    # Pre-index items by category for same-category forward search
+    """Pick SO SKUs for one store from the global ranked list with multi-tier conflict avoidance."""
     cat_lists: Dict[str, List[SORecord]] = defaultdict(list)
-    for rec in so_global_list:          # already sorted by rank
+    for rec in so_global_list:
         cat_lists[rec.category.lower()].append(rec)
 
     def _next_in_category(cat: str, after_rank: int) -> SORecord | None:
@@ -517,12 +604,11 @@ def select_so_for_store(
                 continue
             if candidate.rank in used_ranks:
                 continue
-            if not _is_so_conflict(candidate.name, conflict_entries):
+            if not _is_so_conflict(candidate, conflict_entries):
                 return candidate
         return None
 
     used_ranks: set = set()
-    # Track (cf_value, category, SKURecord) so we can sort by CF per category
     selected_triples: List[Tuple[float, str, SKURecord]] = []
 
     def _sel_count() -> int:
@@ -533,7 +619,7 @@ def select_so_for_store(
             break
 
         already_used = rec.rank in used_ranks
-        has_conflict = _is_so_conflict(rec.name, conflict_entries)
+        has_conflict = _is_so_conflict(rec, conflict_entries)
 
         if not already_used and not has_conflict:
             # Happy path — take this item directly.
@@ -559,7 +645,6 @@ def select_so_for_store(
                         f"('{replacement.sku}')."
                     )
             else:
-                # No further item of this category is available.
                 if not already_used:
                     logger.warning(
                         f"No non-conflicting {rec.category} SO available to replace "
@@ -779,16 +864,45 @@ def generate_planogram(
         if not raw_stock:
             logger.warning(f"No Stock SKUs found for store {store}.", store=store)
 
-        # ── SO: select from global ranked list with conflict avoidance ──────
+        # ── SO: select from global ranked list with multi-tier conflict avoidance ──
         # Capacity = sum of SO slots across all valid bays
         so_capacity = sum(
             BAY_RULES[b].so for b in bay_list if b in BAY_RULES
         )
-        # Conflict set = exact product Names already present in this store's stock
-        stock_names       = [rec.match_name for rec in raw_stock]
-        conflict_entries = _build_conflict_set(stock_names)
+        
+        # Build comprehensive multi-tier conflict context for this store
+        stock_skus = {str(rec.sku).strip() for rec in raw_stock}
+        display_skus = {str(rec.sku).strip() for rec in raw_display}
+        
+        stock_stems = set()
+        for rec in raw_stock:
+            stem_desc = _extract_product_stem(rec.description)
+            stem_name = _extract_product_stem(rec.match_name)
+            if stem_desc:
+                stock_stems.add(stem_desc)
+            if stem_name:
+                stock_stems.add(stem_name)
+        for rec in raw_display:
+            stem_disp = _extract_product_stem(rec.description)
+            if stem_disp:
+                stock_stems.add(stem_disp)
+        stock_stems.discard("")
+
+        stock_names = {
+            _norm_product_name(rec.match_name) 
+            for rec in raw_stock 
+            if _norm_product_name(rec.match_name)
+        }
+
+        conflict_ctx = StoreConflictContext(
+            stock_skus=stock_skus,
+            display_skus=display_skus,
+            stock_stems=stock_stems,
+            stock_names=stock_names,
+        )
+
         raw_so = select_so_for_store(
-            so_global_list, conflict_entries, so_capacity, store, logger
+            so_global_list, conflict_ctx, so_capacity, store, logger
         )
         if not raw_so:
             logger.warning(f"No SO SKUs could be selected for store {store}.", store=store)
