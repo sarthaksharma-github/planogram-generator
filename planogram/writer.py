@@ -17,12 +17,12 @@ from planogram.config import (
 # Styling constants (Home Depot brand colours)
 # ---------------------------------------------------------------------------
 _HEADER_FONT  = Font(bold=True, color="FFFFFF")
-_HD_ORANGE    = PatternFill(fill_type="solid", fgColor="F96302")
-_ERROR_RED    = PatternFill(fill_type="solid", fgColor="CC0000")
+_DARK_HEADER  = PatternFill(fill_type="solid", fgColor="171717")
+_ERROR_RED    = PatternFill(fill_type="solid", fgColor="450A0A")
 _HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 
-def _style_header(ws, fill: PatternFill = _HD_ORANGE) -> None:
+def _style_header(ws, fill: PatternFill = _DARK_HEADER) -> None:
     """Apply bold white text and a coloured fill to the first row of *ws*."""
     for cell in ws[1]:
         cell.font      = _HEADER_FONT
@@ -89,7 +89,7 @@ def write_output_bytes(
     for _, row in planogram_df.iterrows():
         ws_pog.append([row[col] for col in PLANOGRAM_COLUMNS])
 
-    _style_header(ws_pog, fill=_HD_ORANGE)
+    _style_header(ws_pog, fill=_DARK_HEADER)
     _auto_width(ws_pog)
     ws_pog.freeze_panes = "A2"  # keep header visible while scrolling
 

@@ -22,5 +22,5 @@ class SKURecord:
 
     sku: str
     description: str
-    facing: int    # Always 1 or 2 — values outside this range are clamped to 1
+    facing: int    # Always 1 or 2 :  values outside this range are clamped to 1
     sku_type: str  # "Display" | "SO" | "Stock"

@@ -1,41 +1,33 @@
-# Home Depot Planogram Generator
+# HD Planogram Generator
 
-A Streamlit web application that generates complete bay-level planogram layouts for every store from an Excel workbook.
+A high-performance Streamlit web application styled with the ChaiUI design system that generates bay-level planogram layouts, provides automated compliance auditing, and generates store SKU mapping sheets from Excel workbooks.
 
 ## Features
 
-- **Automatic POG format detection** — handles 3 format variants and trailing description text
-- **LFT bays placed first**, followed by POG bays
-- **Robust column detection** — case-insensitive, with positional fallback
-- **Duplicate "Facings" column support** — correctly identifies Stock vs Display facing columns
-- **Invalid facing values clamped to 1** — prevents expansion bugs from CF or other columns
-- **Notes rules** — stable-partition logic to move specific SKUs to the end
-- **Validation sheet** — all issues logged to Excel output without stopping execution
+- **ChaiUI design system**: Restrained dark theme (#0a0a0a), warm hairline borders, cream highlight accents (#ffedd5), Manrope and Montserrat typography, zero box-shadows, and asymmetric corner action buttons.
+- **Animated loading screen**: Smooth 2.4-second fade-in and fade-out transition displaying the application name on initial session launch.
+- **Automatic POG format detection**: Handles multiplier shorthand, explicit lists, single repeated sizes, and trailing description text.
+- **LFT bays placed first**, followed by standard POG bays.
+- **Robust column detection**: Case-insensitive column matching with positional fallbacks.
+- **Facing clamp safety**: Clamps facing values to 1 or 2 to prevent expansion issues.
+- **Automated audit verification**: Validates end-position placement rules (for example, Baja and Vigo) with compliance rate analytics.
+- **Store SKU generator**: Generates store SKU mapping sheets for active board sets.
 
 ## Supported POG Formats
 
 | Input | Result |
 |-------|--------|
-| `12 Bay - 99` | 99 × 12 |
-| `12 Bay - 99 - Floor Tile Test - Str 1602 - June 26` | 99 × 12 (description stripped) |
-| `7 BAY - 99,99,99,99,99,99,87` | explicit list |
-| `10 Bay - 99,...,87 - Floor Tile Test` | explicit list, last description stripped |
-| `10 Bay - 8-99,2-51` | 99×8 + 51×2 (multiplier shorthand) |
+| `12 Bay - 99` | 99 x 12 |
+| `12 Bay - 99 - Floor Tile Test - Str 1602 - June 26` | 99 x 12 (description stripped) |
+| `7 BAY - 99,99,99,99,99,99,87` | Explicit list |
+| `10 Bay - 99,...,87 - Floor Tile Test` | Explicit list, last description stripped |
+| `10 Bay - 8-99,2-51` | 99x8 + 51x2 (multiplier shorthand) |
 
-## Input Workbook Structure
+## Workflows
 
-### Sheet: `Store List`
-| Store | Current Store POG | Current LFT | Notes |
-|-------|-------------------|-------------|-------|
-| 6349 | 8 Bay - 99 - Floor Tile... | 1 Bay - 51 - LFT... | Normal flow |
-
-### Sheet: `Stock SKUs and Displays`
-| Store | Stock SKU | Stock Description | ... | Facings | Display SKU | Display Description | ... | Facings | CF |
-|-------|-----------|-------------------|-----|---------|-------------|---------------------|-----|---------|-----|
-
-### Sheet: `Special Order Boards`
-| Store | SO SKU | Description | ... | Facings | ... | CF |
-|-------|--------|-------------|-----|---------|-----|-----|
+1. **Generate planogram and run audit**: Full pipeline allocating bays into `Generated Planogram`, logging issues into `Validation`, running compliance audit into `Audit Report`, and downloading the complete multi-sheet workbook.
+2. **Audit existing planogram**: Standalone audit mode for existing planogram sheets with CSV export.
+3. **Generate store SKU sheet**: Standalone generator mapping SO Board Sets and SKUs into a new `Store SKU` sheet.
 
 ## Running Locally
 
@@ -44,43 +36,8 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Deploying to Streamlit Cloud
+## Running Tests
 
-1. Push this repository to GitHub
-2. Go to [share.streamlit.io](https://share.streamlit.io)
-3. Connect your GitHub repo
-4. Set **Main file path** to `app.py`
-5. Click **Deploy**
-
-## Project Structure
-
-```
-planogram_app/
-├── app.py                  # Streamlit UI
-├── requirements.txt
-├── .gitignore
-├── README.md
-└── planogram/
-    ├── __init__.py
-    ├── config.py           # BAY_RULES, NOTES_RULES, constants
-    ├── models.py           # SKURecord, BayRule dataclasses
-    ├── logger.py           # PlanogramLogger (deduplicating)
-    ├── parser.py           # POG string parser + self-tests
-    ├── loader.py           # Excel loading, column detection
-    ├── allocator.py        # Bay allocation + orchestrator
-    └── writer.py           # Excel output (BytesIO)
-```
-
-## Extending
-
-### Add a new bay type
-Edit `planogram/config.py`, add one row to `BAY_RULES`:
-```python
-BAY_RULES["63"] = BayRule(display=5, so=1, stock=5)
-```
-
-### Add a new Notes rule
-Edit `planogram/config.py`, append one dict to `NOTES_RULES`:
-```python
-{"trigger": "move calacatta to end", "keywords": ["calacatta"]}
+```bash
+python -m pytest tests/test_planogram.py -v
 ```

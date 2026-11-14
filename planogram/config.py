@@ -56,12 +56,12 @@ SHELF_STOCK_FIRST  = 3  # Shelf 3  -> First half of Stock
 SHELF_STOCK_SECOND = 4  # Shelf 4  -> Remaining Stock
 
 # ---------------------------------------------------------------------------
-# LFT sentinel values — these mean "no LFT for this store"
+# LFT sentinel values :  these mean "no LFT for this store"
 # ---------------------------------------------------------------------------
 LFT_IGNORE_VALUES: frozenset = frozenset(["-", "", "none", "null", "n/a", "na"])
 
 # ---------------------------------------------------------------------------
-# Valid facing values — anything else is clamped to 1.
+# Valid facing values :  anything else is clamped to 1.
 # This prevents expand_facing() exploding when a CF or other numeric column
 # is accidentally mapped to the Facing column.
 # ---------------------------------------------------------------------------

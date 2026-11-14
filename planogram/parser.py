@@ -59,9 +59,9 @@ def parse_pog_string(
     """Parse a POG/LFT description string into an ordered list of bay-size tokens.
 
     Three formats are auto-detected:
-        FORMAT A — multiplier shorthand  : "10 Bay - 8-99,2-51"
-        FORMAT B — explicit comma-list   : "7 BAY - 99,99,99,99,99,99,87"
-        FORMAT C — single repeated size  : "8 Bay - 99"
+        FORMAT A :  multiplier shorthand  : "10 Bay - 8-99,2-51"
+        FORMAT B :  explicit comma-list   : "7 BAY - 99,99,99,99,99,99,87"
+        FORMAT C :  single repeated size  : "8 Bay - 99"
                                            "12 Bay - 99 - Floor Tile Test - Str 1602"
 
     Trailing description text after the bay tokens is ALWAYS silently discarded
@@ -112,14 +112,14 @@ def parse_pog_string(
 
     for tok in raw_tokens:
         if _RE_VALID_TOKEN.match(tok):
-            # Case (a): pure bay-size or multiplier token — keep and continue
+            # Case (a): pure bay-size or multiplier token :  keep and continue
             bay_tokens_raw.append(tok)
         else:
             # Case (b): token has trailing description; extract the prefix only
             m_prefix = _RE_BAYSIZE_PREFIX.match(tok)
             if m_prefix:
                 bay_tokens_raw.append(m_prefix.group(1))
-            # Always stop — description text means no more bay tokens follow
+            # Always stop :  description text means no more bay tokens follow
             break
 
     if not bay_tokens_raw:
@@ -157,31 +157,31 @@ def parse_pog_string(
 
 
 # ---------------------------------------------------------------------------
-# Self-tests — call run_self_tests() to verify the parser is working
+# Self-tests :  call run_self_tests() to verify the parser is working
 # ---------------------------------------------------------------------------
 _SELF_TESTS: List[Tuple[str, List[str]]] = [
-    # FORMAT C — standard with dash
+    # FORMAT C :  standard with dash
     ("8 Bay - 99",
      ["99"] * 8),
-    # FORMAT C — WITH trailing description text
+    # FORMAT C :  WITH trailing description text
     ("12 Bay - 99 - Floor Tile Test - Str 1602 - June 26",
      ["99"] * 12),
     ("5 Bay - 99 - Stone Look Tile -South-v1 - April 2026",
      ["99"] * 5),
     ("1 Bay - 51 - LFT - Full(Sku Swap)",
      ["51"]),
-    # FORMAT B — clean explicit list with dash
+    # FORMAT B :  clean explicit list with dash
     ("7 BAY - 99,99,99,99,99,99,87",
      ["99"] * 6 + ["87"]),
-    # FORMAT B — explicit list WITH trailing description on last token
+    # FORMAT B :  explicit list WITH trailing description on last token
     ("10 Bay - 99,99,99,99,99,99,99,99,99,87 - Floor Tile Test - Str 1503 - June 26",
      ["99"] * 9 + ["87"]),
     ("7 BAY - 99,99,99,99,99,99,87 - Stone Look Tile - Mid",
      ["99"] * 6 + ["87"]),
-    # FORMAT B — with bay-size variants
+    # FORMAT B :  with bay-size variants
     ("10 BAY - 99C,99,99,99,99,99C,99,99,99,99",
      ["99C", "99", "99", "99", "99", "99C", "99", "99", "99", "99"]),
-    # FORMAT A — multiplier shorthand, clean
+    # FORMAT A :  multiplier shorthand, clean
     ("10 Bay - 8-99,2-51",
      ["99"] * 8 + ["51"] * 2),
     # ── Bug fixes: no-dash formats ─────────────────────────────────

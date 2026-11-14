@@ -23,7 +23,7 @@ from planogram.parser import parse_pog_string
 
 
 # ---------------------------------------------------------------------------
-# Facing parser — clamps invalid values to 1
+# Facing parser :  clamps invalid values to 1
 # ---------------------------------------------------------------------------
 
 def _parse_facing(
@@ -43,17 +43,17 @@ def _parse_facing(
         val = int(float(str(raw).strip()))
     except (ValueError, TypeError):
         logger.warning(
-            f"Invalid Facing '{raw}' for SKU {sku} — defaulting to 1.",
+            f"Invalid Facing '{raw}' for SKU {sku} :  defaulting to 1.",
             store=store,
         )
         return 1
 
     if val not in VALID_FACINGS:
         logger.warning(
-            f"Facing value '{raw}' for SKU {sku} is not in {{1, 2}} — defaulting to 1.",
+            f"Facing value '{raw}' for SKU {sku} is not in {{1, 2}} :  defaulting to 1.",
             store=store,
         )
-        return 1  # Must return 1, NOT val — prevents expansion explosion
+        return 1  # Must return 1, NOT val :  prevents expansion explosion
 
     return val
 
@@ -253,21 +253,21 @@ def allocate_bay(
             "Facing":          rec.facing,
         }
 
-    # Shelf 1 — Display Boards
+    # Shelf 1 :  Display Boards
     for pos, rec in enumerate(
         _consume(disp_pool, disp_ptr, rule.display, store, bay_num, "Display", logger),
         start=1,
     ):
         rows.append(_row(SHELF_DISPLAY, pos, rec))
 
-    # Shelf 2 — Special Order Boards
+    # Shelf 2 :  Special Order Boards
     for pos, rec in enumerate(
         _consume(so_pool, so_ptr, rule.so, store, bay_num, "SO", logger),
         start=1,
     ):
         rows.append(_row(SHELF_SO, pos, rec))
 
-    # Shelves 3 & 4 — Stock (odd remainder goes to Shelf 3)
+    # Shelves 3 & 4 :  Stock (odd remainder goes to Shelf 3)
     shelf3_count  = math.ceil(rule.stock / 2)
     stock_records = _consume(
         stock_pool, stock_ptr, rule.stock, store, bay_num, "Stock", logger
@@ -306,7 +306,7 @@ def allocate_store(
         rule = BAY_RULES.get(bay_size)
         if rule is None:
             logger.warning(
-                f"Unsupported Bay Size '{bay_size}' in Bay {bay_num} — skipping.",
+                f"Unsupported Bay Size '{bay_size}' in Bay {bay_num} :  skipping.",
                 store=store,
                 bay_num=bay_num,
             )
@@ -361,8 +361,8 @@ def generate_planogram(
     Returns
     -------
     (planogram_df, validation_df)
-        planogram_df  — position-level layout for all stores.
-        validation_df — all WARNING/ERROR issues logged during generation.
+        planogram_df  :  position-level layout for all stores.
+        validation_df :  all WARNING/ERROR issues logged during generation.
     """
     # Build SKU indexes for all three SKU types
     disp_index  = build_display_index(wb_data.stock_display, wb_data.cols_sd, logger)
@@ -374,7 +374,7 @@ def generate_planogram(
     store_series = wb_data.store_list[store_col].apply(_clean_store_id)
     for dup in store_series[store_series.duplicated(keep=False)].unique():
         if dup:
-            logger.warning(f"Duplicate store '{dup}' in Store List — all rows processed.")
+            logger.warning(f"Duplicate store '{dup}' in Store List :  all rows processed.")
 
     all_output_rows: List[Dict[str, Any]] = []
     seen_stores: set = set()
@@ -382,7 +382,7 @@ def generate_planogram(
     for _, row in wb_data.store_list.iterrows():
         store = _clean_store_id(row[wb_data.cols_sl["store"]])
         if not store:
-            logger.warning("Store column is empty for a row — skipping.")
+            logger.warning("Store column is empty for a row :  skipping.")
             continue
 
         pog_raw = _str(row[wb_data.cols_sl["pog"]])
@@ -390,14 +390,14 @@ def generate_planogram(
         notes   = _str(row[wb_data.cols_sl["notes"]])
 
         if store in seen_stores:
-            logger.warning(f"Store {store} appears more than once — processing duplicate.", store=store)
+            logger.warning(f"Store {store} appears more than once :  processing duplicate.", store=store)
         seen_stores.add(store)
 
         # Parse POG
         pog_bays = parse_pog_string(pog_raw, store=store, logger=logger)
         if not pog_bays:
             logger.warning(
-                f"Malformed/empty POG '{pog_raw}' — skipping store.", store=store
+                f"Malformed/empty POG '{pog_raw}' :  skipping store.", store=store
             )
             continue
 
@@ -407,7 +407,7 @@ def generate_planogram(
             lft_bays = parse_pog_string(lft_raw, store=store, logger=logger)
             if not lft_bays:
                 logger.warning(
-                    f"Malformed LFT '{lft_raw}' — ignoring LFT.", store=store
+                    f"Malformed LFT '{lft_raw}' :  ignoring LFT.", store=store
                 )
 
         # ── LFT BAYS FIRST, then POG bays ──────────────────────────────────

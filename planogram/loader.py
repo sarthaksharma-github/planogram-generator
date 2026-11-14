@@ -157,7 +157,7 @@ def load_workbook_from_bytes(
         df.reset_index(drop=True, inplace=True)
 
     # -----------------------------------------------------------------------
-    # Sheet 1 — Store List
+    # Sheet 1 :  Store List
     # Expected column order: Store | Current Store POG | Current LFT | Notes
     # -----------------------------------------------------------------------
     cols_sl = {
@@ -176,7 +176,7 @@ def load_workbook_from_bytes(
     }
 
     # -----------------------------------------------------------------------
-    # Sheet 2 — Stock SKUs and Displays
+    # Sheet 2 :  Stock SKUs and Displays
     #
     # Typical layout (columns A–J):
     #   A (0) Store
@@ -223,7 +223,7 @@ def load_workbook_from_bytes(
                           ["Display Description", "Display Desc"],
                           6, s_sd, logger,
                       ),
-        # Second "Facings" column — index 7 in 9-column sheets, index 8 in 10-column sheets
+        # Second "Facings" column :  index 7 in 9-column sheets, index 8 in 10-column sheets
         "disp_face":  _find_col(
                           df_sd,
                           ["Display Facing", "Display Facings", "Display", "Facings.1", "Facing.1"],
@@ -233,7 +233,7 @@ def load_workbook_from_bytes(
     }
 
     # -----------------------------------------------------------------------
-    # Sheet 3 — Special Order Boards
+    # Sheet 3 :  Special Order Boards
     #
     # Typical layout:
     #   A (0) Store
